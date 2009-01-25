@@ -28,12 +28,12 @@ VERSION=	@VERSION@
 srcdir=		@srcdir@
 VPATH=		@srcdir@
 
-CC=		@CC@
-CXX=		@CXX@
+CC=		llvm-gcc
+CXX=		llvm-g++
 MAINCC=		@MAINCC@
 LINKCC=		@LINKCC@
-AR=		@AR@
-RANLIB=		@RANLIB@
+AR=		llvm-ar
+RANLIB=		llvm-ranlib
 SVNVERSION=	@SVNVERSION@
 
 # Shell used by make (some versions default to the login shell, which is bad)
@@ -56,8 +56,8 @@ MAKESETUP=      $(srcdir)/Modules/makesetup
 
 # Compiler options
 OPT=		@OPT@
-BASECFLAGS=	@BASECFLAGS@
-CFLAGS=		$(BASECFLAGS) $(OPT) $(EXTRA_CFLAGS)
+BASECFLAGS=	@BASECFLAGS@ 
+CFLAGS=		$(BASECFLAGS) $(OPT) $(EXTRA_CFLAGS) 
 # Both CPPFLAGS and LDFLAGS need to contain the shell's value for setup.py to
 # be able to build extension modules using the directories specified in the
 # environment variables
@@ -66,11 +66,11 @@ LDFLAGS=	@LDFLAGS@
 LDLAST=		@LDLAST@
 SGI_ABI=	@SGI_ABI@
 CCSHARED=	@CCSHARED@
-LINKFORSHARED=	@LINKFORSHARED@
+LINKFORSHARED=	# @LINKFORSHARED@
 # Extra C flags added for building the interpreter object files.
 CFLAGSFORSHARED=@CFLAGSFORSHARED@
 # C flags used for building the interpreter object files
-PY_CFLAGS=	$(CFLAGS) $(CPPFLAGS) $(CFLAGSFORSHARED) -DPy_BUILD_CORE
+PY_CFLAGS=	$(CFLAGS) $(CPPFLAGS) $(CFLAGSFORSHARED) -DPy_BUILD_CORE -emit-llvm
 
 
 # Machine-dependent subdirectories
@@ -102,7 +102,7 @@ LIBP=		$(LIBDIR)/python$(VERSION)
 
 # Symbols used for using shared libraries
 SO=		@SO@
-LDSHARED=	@LDSHARED@
+LDSHARED=	llvm-ld -native $(LDFLAGS) -bundle -undefined dynamic_lookup
 BLDSHARED=	@BLDSHARED@
 DESTSHARED=	$(BINLIBDEST)/lib-dynload
 
@@ -337,7 +337,7 @@ all:		$(BUILDPYTHON) oldsharedmods sharedmods
 
 # Build the interpreter
 $(BUILDPYTHON):	Modules/python.o $(LIBRARY) $(LDLIBRARY)
-		$(LINKCC) $(LDFLAGS) $(LINKFORSHARED) -o $@ \
+		llvm-ld -native -disable-internalize $(LDFLAGS) $(LINKFORSHARED) -o $@ \
 			Modules/python.o \
 			$(BLDLIBRARY) $(LIBS) $(MODLIBS) $(SYSLIBS) $(LDLAST)
 
@@ -477,7 +477,7 @@ $(GRAMMAR_H) $(GRAMMAR_C): $(PGEN) $(GRAMMAR_INPUT)
 		-$(PGEN) $(GRAMMAR_INPUT) $(GRAMMAR_H) $(GRAMMAR_C)
 
 $(PGEN):	$(PGENOBJS)
-		$(CC) $(OPT) $(LDFLAGS) $(PGENOBJS) $(LIBS) -o $(PGEN)
+		llvm-ld -native $(LDFLAGS) $(PGENOBJS) $(LIBS) -o $(PGEN)
 
 Parser/grammar.o:	$(srcdir)/Parser/grammar.c \
 				$(srcdir)/Include/token.h \
