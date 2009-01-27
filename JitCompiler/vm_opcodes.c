@@ -93,8 +93,10 @@ static PyObject * load_args(PyObject ***, int);
 #define READ_TIMESTAMP(x)
 
 OPCODE(UNIMPLEMENTED) {
-    printf("Unsupported opcode %d\n", opcode);
-    CONTINUE();
+    PyErr_Format(PyExc_SystemError,
+                 "Opcode %d not implemented",
+                 opcode);
+    BREAK();
 } END_OPCODE
 
 void check_err(int line, int* err) {

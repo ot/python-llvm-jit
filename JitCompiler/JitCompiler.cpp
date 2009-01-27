@@ -142,21 +142,24 @@ public:
         const uint8_t* bytecode = (const uint8_t*) PyString_AS_STRING(co->co_code);
     
         BasicBlock* entry = BasicBlock::Create("entry", func);
+        BasicBlock* gen_throw_block = BasicBlock::Create("gen_throw", func);
+
         IRBuilder<> builder(entry);
   
         Value* err_var = builder.CreateAlloca(Type::Int32Ty, 0, "err");
         builder.CreateStore(ConstantInt::get(APInt(32, 0)), err_var);
         Value* why_var = builder.CreateAlloca(Type::Int32Ty, 0, "why"); 
-        builder.CreateStore(ConstantInt::get(APInt(32, 1)), why_var); // WHY_NOT
+        builder.CreateStore(ConstantInt::get(APInt(32, WHY_NOT)), why_var); 
         Value* retval_var = builder.CreateAlloca(ty_pyobject_ptr,
                                                  0, "retval");
         Value* dispatch_var = builder.CreateAlloca(Type::Int32Ty, 0, "dispatch_to_instr"); 
-
+        
         BasicBlock* end_block = BasicBlock::Create("end", func);
-        builder.SetInsertPoint(end_block);
-        Value* retvalval = builder.CreateLoad(retval_var);
-        builder.CreateRet(retvalval);
-
+        {
+            builder.SetInsertPoint(end_block);
+            Value* retvalval = builder.CreateLoad(retval_var);
+            builder.CreateRet(retvalval);
+        }
         // create the opcode blocks
 
         BasicBlock* dispatch_block = BasicBlock::Create("dispatch", func);
@@ -177,11 +180,17 @@ public:
             opblocks[line] = opblock; 
             dispatch_switch->addCase(ConstantInt::get(APInt(32, line)), opblock);
         }
-        builder.SetInsertPoint(entry);
-        builder.CreateBr(opblocks[0]);
         
         BasicBlock* block_end_block = BasicBlock::Create("block_end", func);
 
+        // if throwflag goto block_end else opcode0
+        builder.SetInsertPoint(entry);
+        Value* bthrowflag = builder.CreateICmpEQ(func_throwflag, ConstantInt::get(APInt(32, 1))); 
+        builder.CreateCondBr(bthrowflag, gen_throw_block, opblocks[0]);
+        builder.SetInsertPoint(gen_throw_block);
+        builder.CreateStore(ConstantInt::get(APInt(32, WHY_EXCEPTION)), why_var);
+        builder.CreateBr(block_end_block);
+        
         // fill in the opcode blocks
         for (const uint8_t* cur_instr = bytecode; *cur_instr; ++cur_instr) {
             int line = cur_instr - bytecode;
