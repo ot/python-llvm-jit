@@ -62,7 +62,6 @@ public:
         ty_jitted_function = FunctionType::get(ty_pyobject_ptr, func_args, false); // XXX return type
 
         opcode_unimplemented = the_module->getFunction("opcode_UNIMPLEMENTED");
-        check_err = the_module->getFunction("check_err");
         is_top_true = the_module->getFunction("is_top_true");
         unwind_stack = the_module->getFunction("unwind_stack");
 
@@ -164,8 +163,6 @@ public:
 
         IRBuilder<> builder(entry);
   
-        Value* err_var = builder.CreateAlloca(Type::Int32Ty, 0, "err");
-        builder.CreateStore(ConstantInt::get(APInt(32, 0)), err_var);
         Value* why_var = builder.CreateAlloca(Type::Int32Ty, 0, "why"); 
         builder.CreateStore(ConstantInt::get(APInt(32, WHY_NOT)), why_var); 
         Value* retval_var = builder.CreateAlloca(ty_pyobject_ptr,
@@ -227,7 +224,6 @@ public:
             opcode_args.push_back(ConstantInt::get(APInt(32, line)));
             opcode_args.push_back(ConstantInt::get(APInt(32, opcode)));
             opcode_args.push_back(ConstantInt::get(APInt(32, oparg)));
-            opcode_args.push_back(err_var);
             opcode_args.push_back(why_var);
             opcode_args.push_back(retval_var);
 
@@ -240,7 +236,6 @@ public:
             assert(ophandler);                                          \
             opret = builder.CreateCall(ophandler, opcode_args.begin(), opcode_args.end()); \
             to_inline.push_back(opret);                                 \
-            /*            builder.CreateCall2(check_err, ConstantInt::get(APInt(32, line)), err_var); */ \
             /**/
       
             switch(opcode) {
@@ -266,8 +261,7 @@ public:
                 int true_line = line + 3;
                 int false_line = line + 3 + oparg;
                 if (opcode == JUMP_IF_TRUE) std::swap(true_line, false_line);
-                Value* cond = builder.CreateCall2(is_top_true, func_f, err_var);
-                builder.CreateCall2(check_err, ConstantInt::get(APInt(32, line)), err_var); 
+                Value* cond = builder.CreateCall(is_top_true, func_f);
                 Value* bcond = builder.CreateICmpEQ(cond, ConstantInt::get(APInt(32, 1)));
                 builder.CreateCondBr(bcond, opblocks[true_line], opblocks[false_line]);
                 break;
@@ -296,7 +290,6 @@ public:
         std::vector<Value*> args;
         args.push_back(func_f);
         args.push_back(func_tstate);
-        args.push_back(err_var);
         args.push_back(why_var);
         args.push_back(retval_var);
         args.push_back(dispatch_var);
@@ -468,7 +461,6 @@ protected:
 
     std::map<int, llvm::Function*> opcode_funcs;
     llvm::Function* opcode_unimplemented;
-    llvm::Function* check_err;
     llvm::Function* is_top_true;
     llvm::Function* unwind_stack;
 
