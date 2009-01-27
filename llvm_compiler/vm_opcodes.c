@@ -819,8 +819,8 @@ OPCODE(END_FINALLY) {
     Py_DECREF(v);
     // printf("why: %d\n", why); // XXX
     if (why == WHY_NOT)
-        CONTINUE();
-    else 
+        CONTINUE(); // XXX this is a break in ceval
+    else  
         BREAK();
 } END_OPCODE
 
@@ -1315,3 +1315,313 @@ OPCODE(CALL_FUNCTION_VAR) {
         CONTINUE();
     BREAK();
 } END_OPCODE
+
+OPCODE(YIELD_VALUE) {
+    retval = POP();
+    // f->f_stacktop = stack_pointer;
+    why = WHY_YIELD;
+    BREAK();
+} END_OPCODE                    
+
+static PyObject *
+import_from(PyObject *v, PyObject *name)
+{
+	PyObject *x;
+
+	x = PyObject_GetAttr(v, name);
+	if (x == NULL && PyErr_ExceptionMatches(PyExc_AttributeError)) {
+		PyErr_Format(PyExc_ImportError,
+			     "cannot import name %.230s",
+			     PyString_AsString(name));
+	}
+	return x;
+}
+
+static int
+import_all_from(PyObject *locals, PyObject *v)
+{
+	PyObject *all = PyObject_GetAttrString(v, "__all__");
+	PyObject *dict, *name, *value;
+	int skip_leading_underscores = 0;
+	int pos, err;
+
+	if (all == NULL) {
+		if (!PyErr_ExceptionMatches(PyExc_AttributeError))
+			return -1; /* Unexpected error */
+		PyErr_Clear();
+		dict = PyObject_GetAttrString(v, "__dict__");
+		if (dict == NULL) {
+			if (!PyErr_ExceptionMatches(PyExc_AttributeError))
+				return -1;
+			PyErr_SetString(PyExc_ImportError,
+			"from-import-* object has no __dict__ and no __all__");
+			return -1;
+		}
+		all = PyMapping_Keys(dict);
+		Py_DECREF(dict);
+		if (all == NULL)
+			return -1;
+		skip_leading_underscores = 1;
+	}
+
+	for (pos = 0, err = 0; ; pos++) {
+		name = PySequence_GetItem(all, pos);
+		if (name == NULL) {
+			if (!PyErr_ExceptionMatches(PyExc_IndexError))
+				err = -1;
+			else
+				PyErr_Clear();
+			break;
+		}
+		if (skip_leading_underscores &&
+		    PyString_Check(name) &&
+		    PyString_AS_STRING(name)[0] == '_')
+		{
+			Py_DECREF(name);
+			continue;
+		}
+		value = PyObject_GetAttr(v, name);
+		if (value == NULL)
+			err = -1;
+		else if (PyDict_CheckExact(locals))
+			err = PyDict_SetItem(locals, name, value);
+		else
+			err = PyObject_SetItem(locals, name, value);
+		Py_DECREF(name);
+		Py_XDECREF(value);
+		if (err != 0)
+			break;
+	}
+	Py_DECREF(all);
+	return err;
+}
+
+static PyObject *
+build_class(PyObject *methods, PyObject *bases, PyObject *name)
+{
+	PyObject *metaclass = NULL, *result, *base;
+
+	if (PyDict_Check(methods))
+		metaclass = PyDict_GetItemString(methods, "__metaclass__");
+	if (metaclass != NULL)
+		Py_INCREF(metaclass);
+	else if (PyTuple_Check(bases) && PyTuple_GET_SIZE(bases) > 0) {
+		base = PyTuple_GET_ITEM(bases, 0);
+		metaclass = PyObject_GetAttrString(base, "__class__");
+		if (metaclass == NULL) {
+			PyErr_Clear();
+			metaclass = (PyObject *)base->ob_type;
+			Py_INCREF(metaclass);
+		}
+	}
+	else {
+		PyObject *g = PyEval_GetGlobals();
+		if (g != NULL && PyDict_Check(g))
+			metaclass = PyDict_GetItemString(g, "__metaclass__");
+		if (metaclass == NULL)
+			metaclass = (PyObject *) &PyClass_Type;
+		Py_INCREF(metaclass);
+	}
+	result = PyObject_CallFunctionObjArgs(metaclass, name, bases, methods, NULL);
+	Py_DECREF(metaclass);
+	if (result == NULL && PyErr_ExceptionMatches(PyExc_TypeError)) {
+		/* A type error here likely means that the user passed
+		   in a base that was not a class (such the random module
+		   instead of the random.random type).  Help them out with
+		   by augmenting the error message with more information.*/
+
+		PyObject *ptype, *pvalue, *ptraceback;
+
+		PyErr_Fetch(&ptype, &pvalue, &ptraceback);
+		if (PyString_Check(pvalue)) {
+			PyObject *newmsg;
+			newmsg = PyString_FromFormat(
+				"Error when calling the metaclass bases\n    %s",
+				PyString_AS_STRING(pvalue));
+			if (newmsg != NULL) {
+				Py_DECREF(pvalue);
+				pvalue = newmsg;
+			}
+		}
+		PyErr_Restore(ptype, pvalue, ptraceback);
+	}
+	return result;
+}
+
+static int
+exec_statement(PyFrameObject *f, PyObject *prog, PyObject *globals,
+	       PyObject *locals)
+{
+	int n;
+	PyObject *v;
+	int plain = 0;
+
+	if (PyTuple_Check(prog) && globals == Py_None && locals == Py_None &&
+	    ((n = PyTuple_Size(prog)) == 2 || n == 3)) {
+		/* Backward compatibility hack */
+		globals = PyTuple_GetItem(prog, 1);
+		if (n == 3)
+			locals = PyTuple_GetItem(prog, 2);
+		prog = PyTuple_GetItem(prog, 0);
+	}
+	if (globals == Py_None) {
+		globals = PyEval_GetGlobals();
+		if (locals == Py_None) {
+			locals = PyEval_GetLocals();
+			plain = 1;
+		}
+		if (!globals || !locals) {
+			PyErr_SetString(PyExc_SystemError,
+					"globals and locals cannot be NULL");
+			return -1;
+		}
+	}
+	else if (locals == Py_None)
+		locals = globals;
+	if (!PyString_Check(prog) &&
+	    !PyUnicode_Check(prog) &&
+	    !PyCode_Check(prog) &&
+	    !PyFile_Check(prog)) {
+		PyErr_SetString(PyExc_TypeError,
+			"exec: arg 1 must be a string, file, or code object");
+		return -1;
+	}
+	if (!PyDict_Check(globals)) {
+		PyErr_SetString(PyExc_TypeError,
+		    "exec: arg 2 must be a dictionary or None");
+		return -1;
+	}
+	if (!PyMapping_Check(locals)) {
+		PyErr_SetString(PyExc_TypeError,
+		    "exec: arg 3 must be a mapping or None");
+		return -1;
+	}
+	if (PyDict_GetItemString(globals, "__builtins__") == NULL)
+		PyDict_SetItemString(globals, "__builtins__", f->f_builtins);
+	if (PyCode_Check(prog)) {
+		if (PyCode_GetNumFree((PyCodeObject *)prog) > 0) {
+			PyErr_SetString(PyExc_TypeError,
+		"code object passed to exec may not contain free variables");
+			return -1;
+		}
+		v = PyEval_EvalCode((PyCodeObject *) prog, globals, locals);
+	}
+	else if (PyFile_Check(prog)) {
+		FILE *fp = PyFile_AsFile(prog);
+		char *name = PyString_AsString(PyFile_Name(prog));
+		PyCompilerFlags cf;
+		if (name == NULL)
+			return -1;
+		cf.cf_flags = 0;
+		if (PyEval_MergeCompilerFlags(&cf))
+			v = PyRun_FileFlags(fp, name, Py_file_input, globals,
+					    locals, &cf);
+		else
+			v = PyRun_File(fp, name, Py_file_input, globals,
+				       locals);
+	}
+	else {
+		PyObject *tmp = NULL;
+		char *str;
+		PyCompilerFlags cf;
+		cf.cf_flags = 0;
+#ifdef Py_USING_UNICODE
+		if (PyUnicode_Check(prog)) {
+			tmp = PyUnicode_AsUTF8String(prog);
+			if (tmp == NULL)
+				return -1;
+			prog = tmp;
+			cf.cf_flags |= PyCF_SOURCE_IS_UTF8;
+		}
+#endif
+		if (PyString_AsStringAndSize(prog, &str, NULL))
+			return -1;
+		if (PyEval_MergeCompilerFlags(&cf))
+			v = PyRun_StringFlags(str, Py_file_input, globals,
+					      locals, &cf);
+		else
+			v = PyRun_String(str, Py_file_input, globals, locals);
+		Py_XDECREF(tmp);
+	}
+	if (plain)
+		PyFrame_LocalsToFast(f, 0);
+	if (v == NULL)
+		return -1;
+	Py_DECREF(v);
+	return 0;
+}
+
+OPCODE(IMPORT_NAME) {
+    w = GETITEM(names, oparg);
+    x = PyDict_GetItemString(f->f_builtins, "__import__");
+    if (x == NULL) {
+        PyErr_SetString(PyExc_ImportError,
+                        "__import__ not found");
+        BREAK();
+    }
+    Py_INCREF(x);
+    v = POP();
+    u = TOP();
+    if (PyInt_AsLong(u) != -1 || PyErr_Occurred())
+        w = PyTuple_Pack(5,
+                         w,
+                         f->f_globals,
+                         f->f_locals == NULL ?
+                         Py_None : f->f_locals,
+                         v,
+                         u);
+    else
+        w = PyTuple_Pack(4,
+                         w,
+                         f->f_globals,
+                         f->f_locals == NULL ?
+                         Py_None : f->f_locals,
+                         v);
+    Py_DECREF(v);
+    Py_DECREF(u);
+    if (w == NULL) {
+        u = POP();
+        Py_DECREF(x);
+        x = NULL;
+        BREAK();
+    }
+    READ_TIMESTAMP(intr0);
+    v = x;
+    x = PyEval_CallObject(v, w);
+    Py_DECREF(v);
+    READ_TIMESTAMP(intr1);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(IMPORT_STAR) {
+    v = POP();
+    PyFrame_FastToLocals(f);
+    if ((x = f->f_locals) == NULL) {
+        PyErr_SetString(PyExc_SystemError,
+                        "no locals found during 'import *'");
+        BREAK();
+    }
+    READ_TIMESTAMP(intr0);
+    err = import_all_from(x, v);
+    READ_TIMESTAMP(intr1);
+    PyFrame_LocalsToFast(f, 0);
+    Py_DECREF(v);
+    if (err == 0) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(IMPORT_FROM) {
+    w = GETITEM(names, oparg);
+    v = TOP();
+    READ_TIMESTAMP(intr0);
+    x = import_from(v, w);
+    READ_TIMESTAMP(intr1);
+    PUSH(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+

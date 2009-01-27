@@ -10,6 +10,12 @@
 #include <llvm/ExecutionEngine/GenericValue.h>
 #include <llvm/DerivedTypes.h>
 #include <llvm/Support/IRBuilder.h>
+#include "llvm/Transforms/Utils/Cloning.h"
+
+#include <llvm/PassManager.h>
+#include <llvm/Target/TargetData.h>
+#include <llvm/Transforms/Scalar.h>
+#include <llvm/Transforms/IPO.h>
 
 #include "Python.h"
 #include "opcode.h"
@@ -25,7 +31,7 @@ intptr_t py_id(PyObject* o) {
     return (intptr_t)o;
 }
 
-typedef PyObject* (*jitted_cfunc_t)(PyFrameObject*);
+typedef PyObject* (*jitted_cfunc_t)(PyFrameObject*, PyThreadState*, int);
 
 class JITRuntime {
 public:
@@ -51,6 +57,7 @@ public:
         std::vector<const Type*> func_args;
         func_args.push_back(ty_pyframe_ptr);
         func_args.push_back(ty_pythreadstate_ptr);
+        func_args.push_back(Type::Int32Ty);
         ty_jitted_function = FunctionType::get(ty_pyobject_ptr, func_args, false); // XXX return type
 
         opcode_unimplemented = the_module->getFunction("opcode_UNIMPLEMENTED");
@@ -58,6 +65,10 @@ public:
         is_top_true = the_module->getFunction("is_top_true");
         unwind_stack = the_module->getFunction("unwind_stack");
 
+        MP->materializeModule(); // XXX needed for inlining?
+
+        
+        
         register_opcodes();
     }
   
@@ -76,6 +87,10 @@ public:
         func_f->setName("f");
         Value* func_tstate = func_args++;
         func_tstate->setName("tstate");
+        Value* func_rethrow = func_args++; // XXX
+        func_rethrow->setName("rethrow");
+
+        std::vector<CallInst*> to_inline;
 
         const uint8_t* bytecode = (const uint8_t*) PyString_AS_STRING(co->co_code);
     
@@ -143,16 +158,18 @@ public:
             opcode_args.push_back(retval_var);
 
             Function* ophandler;
-            Value* opret;
+            CallInst* opret;
             Value* b_opret;
 #           define DEFAULT_HANDLER                                      \
             if (opcode_funcs.count(opcode)) ophandler = opcode_funcs[opcode]; \
             else ophandler = opcode_unimplemented;                      \
             opret = builder.CreateCall(ophandler, opcode_args.begin(), opcode_args.end()); \
+            to_inline.push_back(opret);                                 \
             /*            builder.CreateCall2(check_err, ConstantInt::get(APInt(32, line)), err_var); */ \
             /**/
       
             switch(opcode) {
+            case YIELD_VALUE: // XXX this will have to change (trace?)
             case RETURN_VALUE:
                 DEFAULT_HANDLER;
                 builder.CreateBr(block_end_block);
@@ -210,17 +227,20 @@ public:
         Value* b_do_jump = builder.CreateICmpEQ(do_jump, ConstantInt::get(APInt(32, 1)));
         builder.CreateCondBr(b_do_jump, dispatch_block, end_block);
 
-        //func->dump();
+        for (size_t i = 0; i < to_inline.size(); ++i) {
+            printf("Inlining\n");
+            to_inline[i]->dump();
+            InlineFunction(to_inline[i]);
+        }
+        func->dump();
       
         return func;
     }
 
     void run(llvm::Function* func, PyFrameObject* f, PyThreadState* tstate) {
         using namespace llvm;
-        std::vector<GenericValue> args;
-        args.push_back(GenericValue((void*)f));
-        args.push_back(GenericValue((void*)tstate));
-        EE->runFunction(func, args);
+        jitted_cfunc_t cfunc = (jitted_cfunc_t)EE->getPointerToFunction(func);
+        cfunc(f, tstate, 0);
     }
 
 protected:
@@ -270,6 +290,11 @@ protected:
         REGISTER_ALIAS(CALL_FUNCTION_VAR_KW, CALL_FUNCTION_VAR);
 
         REGISTER_OPCODE(LOAD_ATTR);
+
+        REGISTER_OPCODE(IMPORT_FROM);
+        REGISTER_OPCODE(IMPORT_STAR);
+        REGISTER_OPCODE(IMPORT_NAME);
+        
             
 #       undef REGISTER_OPCODE
 #       undef REGISTER_ALIAS
