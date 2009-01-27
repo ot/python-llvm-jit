@@ -57,7 +57,7 @@ enum why_code {
 #define RETURN(v) do {                            \
         ret = (v);                                \
         goto end;                                 \
-    } while(0);                                   \
+    } while(0)                                    \
     /**/
 
 #define BREAK() RETURN(0)
@@ -817,7 +817,11 @@ OPCODE(END_FINALLY) {
         why = WHY_EXCEPTION;
     }
     Py_DECREF(v);
-    BREAK();
+    // printf("why: %d\n", why); // XXX
+    if (why == WHY_NOT)
+        CONTINUE();
+    else 
+        BREAK();
 } END_OPCODE
 
 static void
@@ -1257,4 +1261,57 @@ OPCODE(MAKE_CLOSURE) {
     }
     PUSH(x);
     CONTINUE(); // XXX this is break in ceval
+} END_OPCODE
+
+OPCODE(LOAD_ATTR) {
+    w = GETITEM(names, oparg);
+    v = TOP();
+    x = PyObject_GetAttr(v, w);
+    Py_DECREF(v);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(CALL_FUNCTION_VAR) {
+    int na = oparg & 0xff;
+    int nk = (oparg>>8) & 0xff;
+    int flags = (opcode - CALL_FUNCTION) & 3;
+    int n = na + 2 * nk;
+    PyObject **pfunc, *func, **sp;
+    PCALL(PCALL_ALL);
+    if (flags & CALL_FLAG_VAR)
+        n++;
+    if (flags & CALL_FLAG_KW)
+        n++;
+    pfunc = stack_pointer - n - 1;
+    func = *pfunc;
+
+    if (PyMethod_Check(func)
+        && PyMethod_GET_SELF(func) != NULL) {
+        PyObject *self = PyMethod_GET_SELF(func);
+        Py_INCREF(self);
+        func = PyMethod_GET_FUNCTION(func);
+        Py_INCREF(func);
+        Py_DECREF(*pfunc);
+        *pfunc = self;
+        na++;
+        n++;
+    } else
+        Py_INCREF(func);
+    sp = stack_pointer;
+    READ_TIMESTAMP(intr0);
+    x = ext_do_call(func, &sp, flags, na, nk);
+    READ_TIMESTAMP(intr1);
+    stack_pointer = sp;
+    Py_DECREF(func);
+
+    while (stack_pointer > pfunc) {
+        w = POP();
+        Py_DECREF(w);
+    }
+    PUSH(x);
+    if (x != NULL)
+        CONTINUE();
+    BREAK();
 } END_OPCODE
