@@ -127,6 +127,7 @@ public:
 
             SmallVector<Value*, 5> opcode_args;
             opcode_args.push_back(func_f);
+            opcode_args.push_back(ConstantInt::get(APInt(32, line)));
             opcode_args.push_back(ConstantInt::get(APInt(32, opcode)));
             opcode_args.push_back(ConstantInt::get(APInt(32, oparg)));
             opcode_args.push_back(err_var);
@@ -134,11 +135,12 @@ public:
             opcode_args.push_back(retval_var);
 
             Function* ophandler;
+            Value* opret;
 #           define DEFAULT_HANDLER                                      \
             if (opcode_funcs.count(opcode)) ophandler = opcode_funcs[opcode]; \
             else ophandler = opcode_unimplemented;                      \
-            builder.CreateCall(ophandler, opcode_args.begin(), opcode_args.end()); \
-            builder.CreateCall(check_err, err_var);                     \
+            opret = builder.CreateCall(ophandler, opcode_args.begin(), opcode_args.end()); \
+            builder.CreateCall2(check_err, ConstantInt::get(APInt(32, line)), err_var);                \
             /**/
       
             switch(opcode) {
@@ -151,17 +153,31 @@ public:
                 builder.CreateBr(opblocks[next_line]);
                 break;
             }
+            case JUMP_ABSOLUTE: {
+                builder.CreateBr(opblocks[oparg]);
+                break;
+            }
             case JUMP_IF_TRUE:
             case JUMP_IF_FALSE: {
                 int true_line = line + 3;
                 int false_line = line + 3 + oparg;
                 if (opcode == JUMP_IF_TRUE) std::swap(true_line, false_line);
                 Value* cond = builder.CreateCall2(is_top_true, func_f, err_var);
-                builder.CreateCall(check_err, err_var); 
+                builder.CreateCall2(check_err, ConstantInt::get(APInt(32, line)), err_var); 
                 Value* bcond = builder.CreateICmpEQ(cond, ConstantInt::get(APInt(32, 1)));
                 builder.CreateCondBr(bcond, opblocks[true_line], opblocks[false_line]);
                 break;
             }
+
+            case FOR_ITER: {
+                opret = builder.CreateCall(opcode_funcs[opcode], opcode_args.begin(), opcode_args.end());
+                SwitchInst* sw = builder.CreateSwitch(opret, block_end_block);
+                sw->addCase(ConstantInt::get(APInt(32, 0)), block_end_block); // error
+                sw->addCase(ConstantInt::get(APInt(32, 1)), opblocks[line + 3]); // continue loop
+                sw->addCase(ConstantInt::get(APInt(32, 2)), opblocks[line + 3 + oparg]); // end loop
+                break;
+            }
+                
             default: {
                 DEFAULT_HANDLER;
                 int next_line = line + (HAS_ARG(opcode) ? 3 : 1);
@@ -194,6 +210,10 @@ protected:
             opcode_funcs[OPCODENAME] = ophandler;                       \
         }                                                               \
         /**/
+
+#       define REGISTER_ALIAS(ALIAS, OPCODENAME)       \
+        opcode_funcs[ALIAS] = opcode_funcs[OPCODENAME];          \
+        /**/
             
         REGISTER_OPCODE(STORE_NAME);
         REGISTER_OPCODE(RETURN_VALUE);
@@ -203,8 +223,20 @@ protected:
         REGISTER_OPCODE(LOAD_NAME);
         REGISTER_OPCODE(COMPARE_OP);
         REGISTER_OPCODE(POP_TOP);
+
+        REGISTER_OPCODE(SETUP_LOOP);
+        REGISTER_ALIAS(SETUP_EXCEPT, SETUP_LOOP);
+        REGISTER_ALIAS(SETUP_FINALLY, SETUP_LOOP);
+
+        REGISTER_OPCODE(BUILD_LIST);
+
+        REGISTER_OPCODE(GET_ITER);
+        REGISTER_OPCODE(FOR_ITER);
+
+        REGISTER_OPCODE(POP_BLOCK);
             
 #       undef REGISTER_OPCODE
+#       undef REGISTER_ALIAS
         
     }
       

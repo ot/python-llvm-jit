@@ -21,7 +21,7 @@ enum why_code {
 };
 
 #define OPCODE(OPCODENAME)                                                  \
-    void opcode_##OPCODENAME (PyFrameObject* f, int opcode, int oparg, int* err_out, int* why_out, PyObject** retval_out) { \
+    int opcode_##OPCODENAME (PyFrameObject* f, int line, int opcode, int oparg, int* err_out, int* why_out, PyObject** retval_out) { \
         PyObject* v = 0;                                                \
         PyObject* x = Py_None;                                          \
         PyObject* y = 0;                                                \
@@ -34,9 +34,12 @@ enum why_code {
         PyObject* names = co->co_names;                                 \
         PyObject* consts = co->co_consts;                               \
         PyObject **stack_pointer = f->f_stacktop;                       \
+        int ret = 1;                                                    \
         /**/
+        //        printf("Executing opcode %d with oparg %d\n", opcode, oparg); \
 
 #define END_OPCODE                                                      \
+    end:                                                                \
         *err_out = err;                                                 \
         *why_out = why;                                                 \
         *retval_out = retval;                                           \
@@ -45,8 +48,18 @@ enum why_code {
         (void)v; (void)x; (void)y; (void)w; (void)z;                    \
         (void)stream;                                                   \
         (void)names; (void)consts;                                      \
-    }                                                                   \
+        return ret;                                                     \
+        }                                                               \
+        /**/                                                                            
+
+#define RETURN(v) do {                            \
+        ret = (v);                                \
+        goto end;                                 \
+    } while(0);                                   \
     /**/
+
+#define BREAK() RETURN(0)
+#define CONTINUE() RETURN(1)
 
 #define STACK_LEVEL()	((int)(stack_pointer - f->f_valuestack))
 #define EMPTY()		(STACK_LEVEL() == 0)
@@ -64,18 +77,23 @@ enum why_code {
 
 #define POP() BASIC_POP()
 #define PUSH(v)	BASIC_PUSH(v)
+#define STACKADJ(n) BASIC_STACKADJ(n)
 
-#define GETITEM(v, i) PyTuple_GET_ITEM((PyTupleObject *)(v), (i))
-//#define GETITEM(v, i) PyTuple_GetItem((v), (i)) // XXX Use macro
+#define INSTR_OFFSET() line
+
+//#define GETITEM(v, i) PyTuple_GET_ITEM((PyTupleObject *)(v), (i))
+#define GETITEM(v, i) PyTuple_GetItem((v), (i)) // XXX Use macro
 
 OPCODE(UNIMPLEMENTED) {
     printf("Unsupported opcode %d\n", opcode);
+    CONTINUE();
 } END_OPCODE
 
-void check_err(int* err) {
+void check_err(int line, int* err) {
     if (*err != 0) {
-        printf("Error %d!!\n", *err);
+        printf("Line %d, error %d!!\n", line, *err);
         fflush(stdout);
+        *err = 0;
     }
 }
 
@@ -88,11 +106,13 @@ OPCODE(STORE_NAME) {
         else
             err = PyObject_SetItem(x, w, v);
         Py_DECREF(v);
-        return;
+        if (err == 0) CONTINUE();
+        BREAK();
     }
     PyErr_Format(PyExc_SystemError,
                  "no locals found when storing %s",
                  PyObject_REPR(w));
+    BREAK();
 } END_OPCODE // XXX handle error
 
 #define NAME_ERROR_MSG \
@@ -122,12 +142,11 @@ format_exc_check_arg(PyObject *exc, char *format_str, PyObject *obj)
 
 OPCODE(LOAD_NAME) {
     w = GETITEM(names, oparg);
-    err = 1;
     if ((v = f->f_locals) == NULL) {
         PyErr_Format(PyExc_SystemError,
                      "no locals when loading %s",
                      PyObject_REPR(w));
-        return;
+        BREAK();
     }
     if (PyDict_CheckExact(v)) {
         x = PyDict_GetItem(v, w);
@@ -137,7 +156,7 @@ OPCODE(LOAD_NAME) {
         x = PyObject_GetItem(v, w);
         if (x == NULL && PyErr_Occurred()) {
             if (!PyErr_ExceptionMatches(PyExc_KeyError))
-                return;
+                BREAK();
             PyErr_Clear();
         }
     }
@@ -149,26 +168,27 @@ OPCODE(LOAD_NAME) {
                 format_exc_check_arg(
                                      PyExc_NameError,
                                      NAME_ERROR_MSG ,w);
-                return;
+                BREAK();
             }
         }
         Py_INCREF(x);
     }
     PUSH(x);
-    err = 0;
+    CONTINUE();
 } END_OPCODE 
 
 OPCODE(LOAD_CONST) {
     x = GETITEM(consts, oparg);
-    assert(x != 0);
     Py_INCREF(x);
     PUSH(x);
-} END_OPCODE // XXX check error
+    CONTINUE();
+} END_OPCODE 
 
 
 OPCODE(RETURN_VALUE) {
     retval = POP();
     why = WHY_RETURN;
+    BREAK();
 } END_OPCODE
 
 OPCODE(PRINT_ITEM) {
@@ -217,6 +237,9 @@ OPCODE(PRINT_ITEM) {
     Py_DECREF(v);
     Py_XDECREF(stream);
     stream = NULL;
+    if (err == 0)
+        CONTINUE();
+    BREAK();
 } END_OPCODE
 
 OPCODE(PRINT_NEWLINE) {
@@ -233,6 +256,7 @@ OPCODE(PRINT_NEWLINE) {
     }
     Py_XDECREF(stream);
     stream = NULL;
+    CONTINUE(); // why is this "break" in ceval.c?
 } END_OPCODE
 
 static PyObject *
@@ -298,13 +322,14 @@ OPCODE(COMPARE_OP) {
     Py_DECREF(v);
     Py_DECREF(w);
     SET_TOP(x);
-    if (!x) err = 1; // XXX 
-
+    if (x == NULL) BREAK();
+    CONTINUE();
 } END_OPCODE
 
 OPCODE(POP_TOP) {
     v = POP();
     Py_DECREF(v);
+    CONTINUE();
 } END_OPCODE
 
 int is_top_true(PyFrameObject* f, int* err) {
@@ -324,3 +349,63 @@ int is_top_true(PyFrameObject* f, int* err) {
     }
     return 0; // err is nonzero
 } 
+
+OPCODE(SETUP_LOOP) {
+    PyFrame_BlockSetup(f, opcode, INSTR_OFFSET() + oparg,
+                       STACK_LEVEL());
+    CONTINUE();
+} END_OPCODE
+
+OPCODE(BUILD_LIST) {
+    x =  PyList_New(oparg);
+    if (x != NULL) {
+        for (; --oparg >= 0;) {
+            w = POP();
+            PyList_SET_ITEM(x, oparg, w);
+        }
+        PUSH(x);
+        CONTINUE();
+    } 
+    BREAK();
+} END_OPCODE
+
+OPCODE(GET_ITER) {
+    v = TOP();
+    x = PyObject_GetIter(v);
+    Py_DECREF(v);
+    if (x != NULL) {
+        SET_TOP(x);
+        CONTINUE();
+    }
+    STACKADJ(-1);
+    BREAK();
+} END_OPCODE
+
+OPCODE(FOR_ITER) {
+    /* before: [iter]; after: [iter, iter()] *or* [] */
+    v = TOP();
+    x = (*v->ob_type->tp_iternext)(v);
+    if (x != NULL) {
+        PUSH(x);
+        CONTINUE();
+    }
+    if (PyErr_Occurred()) {
+        if (!PyErr_ExceptionMatches(PyExc_StopIteration)) 
+            BREAK();
+        PyErr_Clear();
+    }
+    /* iterator ended normally */
+    x = v = POP();
+    Py_DECREF(v);
+    RETURN(2); // Special value to signal iteration end
+} END_OPCODE
+
+OPCODE(POP_BLOCK) {
+    PyTryBlock *b = PyFrame_BlockPop(f);
+    while (STACK_LEVEL() > b->b_level) {
+        v = POP();
+        Py_DECREF(v);
+    }
+    CONTINUE();
+} END_OPCODE
+
