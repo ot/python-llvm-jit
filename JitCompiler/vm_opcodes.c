@@ -1,6 +1,6 @@
 /* -*- c-basic-offset: 4; indent-tabs-mode: nil; mode: c++ -*- */
 
-#include <assert.h>
+#include "JitCompiler.h"
 
 #include "Python.h"
 #include "opcode.h"
@@ -8,17 +8,6 @@
 #include "frameobject.h"
 
 #include <stdlib.h>
-
-/* Status code for main loop (reason for stack unwind) */
-enum why_code {
-		WHY_NOT =	0x0001,	/* No error */
-		WHY_EXCEPTION = 0x0002,	/* Exception occurred */
-		WHY_RERAISE =	0x0004,	/* Exception re-raised by 'finally' */
-		WHY_RETURN =	0x0008,	/* 'return' statement */
-		WHY_BREAK =	0x0010,	/* 'break' statement */
-		WHY_CONTINUE =	0x0020,	/* 'continue' statement */
-		WHY_YIELD =	0x0040	/* 'yield' operator */
-};
 
 #define OPCODE(OPCODENAME)                                                  \
     int opcode_##OPCODENAME (PyFrameObject* f, int line, int opcode, int oparg, int* err_out, int* why_out, PyObject** retval_out) { \
@@ -1273,6 +1262,18 @@ OPCODE(LOAD_ATTR) {
     BREAK();
 } END_OPCODE
 
+OPCODE(STORE_ATTR) {
+    w = GETITEM(names, oparg);
+    v = TOP();
+    u = SECOND();
+    STACKADJ(-2);
+    err = PyObject_SetAttr(v, w, u); /* v.w = u */
+    Py_DECREF(v);
+    Py_DECREF(u);
+    if (err == 0) CONTINUE();
+    BREAK();
+} END_OPCODE
+
 OPCODE(CALL_FUNCTION_VAR) {
     int na = oparg & 0xff;
     int nk = (oparg>>8) & 0xff;
@@ -1624,4 +1625,264 @@ OPCODE(IMPORT_FROM) {
     BREAK();
 } END_OPCODE
 
+OPCODE(BUILD_CLASS) {
+    u = TOP();
+    v = SECOND();
+    w = THIRD();
+    STACKADJ(-2);
+    x = build_class(u, v, w);
+    SET_TOP(x);
+    Py_DECREF(u);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    CONTINUE();
+} END_OPCODE
+
+OPCODE(EXEC_STMT) {
+    w = TOP();
+    v = SECOND();
+    u = THIRD();
+    STACKADJ(-3);
+    READ_TIMESTAMP(intr0);
+    err = exec_statement(f, u, v, w);
+    READ_TIMESTAMP(intr1);
+    Py_DECREF(u);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    CONTINUE();
+} END_OPCODE
+
+OPCODE(DELETE_NAME) {
+    w = GETITEM(names, oparg);
+    if ((x = f->f_locals) != NULL) {
+        if ((err = PyObject_DelItem(x, w)) != 0) {
+            format_exc_check_arg(PyExc_NameError,
+                                 NAME_ERROR_MSG ,w);
+            BREAK();
+        }
+        CONTINUE();
+    }
+    PyErr_Format(PyExc_SystemError,
+                 "no locals when deleting %s",
+                 PyObject_REPR(w));
+    BREAK();
+} END_OPCODE
+
+OPCODE(BUILD_TUPLE) {
+    x = PyTuple_New(oparg);
+    if (x != NULL) {
+        for (; --oparg >= 0;) {
+            w = POP();
+            PyTuple_SET_ITEM(x, oparg, w);
+        }
+        PUSH(x);
+        CONTINUE();
+    }
+    BREAK();
+} END_OPCODE
+
+/* Local variable macros */
+
+#define GETLOCAL(i)	(f->f_localsplus[i])
+
+/* The SETLOCAL() macro must not DECREF the local variable in-place and
+   then store the new value; it must copy the old value to a temporary
+   value, then store the new value, and then DECREF the temporary value.
+   This is because it is possible that during the DECREF the frame is
+   accessed by other code (e.g. a __del__ method or gc.collect()) and the
+   variable would be pointing to already-freed memory. */
+#define SETLOCAL(i, value)	do { PyObject *tmp = GETLOCAL(i); \
+				     GETLOCAL(i) = value; \
+                                     Py_XDECREF(tmp); } while (0)
+
+OPCODE(LOAD_FAST) {
+    x = GETLOCAL(oparg);
+    if (x != NULL) {
+        Py_INCREF(x);
+        PUSH(x);
+        CONTINUE();
+    }
+    format_exc_check_arg(PyExc_UnboundLocalError,
+                         UNBOUNDLOCAL_ERROR_MSG,
+                         PyTuple_GetItem(co->co_varnames, oparg));
+    BREAK();
+} END_OPCODE
+
+OPCODE(STORE_FAST) {
+    v = POP();
+    SETLOCAL(oparg, v);
+    CONTINUE();
+} END_OPCODE
+
+OPCODE(DELETE_FAST) {
+    x = GETLOCAL(oparg);
+    if (x != NULL) {
+        SETLOCAL(oparg, NULL);
+        CONTINUE();
+    }
+    format_exc_check_arg(
+                         PyExc_UnboundLocalError,
+                         UNBOUNDLOCAL_ERROR_MSG,
+                         PyTuple_GetItem(co->co_varnames, oparg)
+                         );
+    BREAK();
+
+} END_OPCODE
+
+OPCODE(LOAD_LOCALS) {
+    if ((x = f->f_locals) != NULL) {
+        Py_INCREF(x);
+        PUSH(x);
+        CONTINUE();
+    }
+    PyErr_SetString(PyExc_SystemError, "no locals");
+    BREAK();
+} END_OPCODE
+
+OPCODE(LOAD_GLOBAL) {
+    w = GETITEM(names, oparg);
+    if (PyString_CheckExact(w)) {
+        /* Inline the PyDict_GetItem() calls.
+           WARNING: this is an extreme speed hack.
+           Do not try this at home. */
+        long hash = ((PyStringObject *)w)->ob_shash;
+        if (hash != -1) {
+            PyDictObject *d;
+            PyDictEntry *e;
+            d = (PyDictObject *)(f->f_globals);
+            e = d->ma_lookup(d, w, hash);
+            if (e == NULL) {
+                x = NULL;
+                BREAK();
+            }
+            x = e->me_value;
+            if (x != NULL) {
+                Py_INCREF(x);
+                PUSH(x);
+                CONTINUE();
+            }
+            d = (PyDictObject *)(f->f_builtins);
+            e = d->ma_lookup(d, w, hash);
+            if (e == NULL) {
+                x = NULL;
+                BREAK();
+            }
+            x = e->me_value;
+            if (x != NULL) {
+                Py_INCREF(x);
+                PUSH(x);
+                CONTINUE();
+            }
+            goto load_global_error;
+        }
+    }
+    /* This is the un-inlined version of the code above */
+    x = PyDict_GetItem(f->f_globals, w);
+    if (x == NULL) {
+        x = PyDict_GetItem(f->f_builtins, w);
+        if (x == NULL) {
+        load_global_error:
+            format_exc_check_arg(
+                                 PyExc_NameError,
+                                 GLOBAL_NAME_ERROR_MSG, w);
+            BREAK();
+        }
+    }
+    Py_INCREF(x);
+    PUSH(x);
+    CONTINUE();
+} END_OPCODE
+
+OPCODE(STORE_GLOBAL) {
+    w = GETITEM(names, oparg);
+    v = POP();
+    err = PyDict_SetItem(f->f_globals, w, v);
+    Py_DECREF(v);
+    if (err == 0) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(BINARY_SUBSCR) {
+    w = POP();
+    v = TOP();
+    if (PyList_CheckExact(v) && PyInt_CheckExact(w)) {
+        /* INLINE: list[int] */
+        Py_ssize_t i = PyInt_AsSsize_t(w);
+        if (i < 0)
+            i += PyList_GET_SIZE(v);
+        if (i >= 0 && i < PyList_GET_SIZE(v)) {
+            x = PyList_GET_ITEM(v, i);
+            Py_INCREF(x);
+        }
+        else
+            goto slow_get;
+    }
+    else
+    slow_get:
+        x = PyObject_GetItem(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(STORE_SUBSCR) {
+    w = TOP();
+    v = SECOND();
+    u = THIRD();
+    STACKADJ(-3);
+    /* v[w] = u */
+    err = PyObject_SetItem(v, w, u);
+    Py_DECREF(u);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    if (err == 0) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(LIST_APPEND) {
+    w = POP();
+    v = POP();
+    err = PyList_Append(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    if (err == 0) {
+        CONTINUE();
+    }
+    BREAK();
+} END_OPCODE
+
+OPCODE(BUILD_MAP) {
+    x = PyDict_New();
+    PUSH(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(PRINT_EXPR) {
+    v = POP();
+    w = PySys_GetObject("displayhook");
+    if (w == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "lost sys.displayhook");
+        err = -1;
+        x = NULL;
+    }
+    if (err == 0) {
+        x = PyTuple_Pack(1, v);
+        if (x == NULL)
+            err = -1;
+    }
+    if (err == 0) {
+        w = PyEval_CallObject(w, x);
+        Py_XDECREF(w);
+        if (w == NULL)
+            err = -1;
+    }
+    Py_DECREF(v);
+    Py_XDECREF(x);
+    if (err == 0) CONTINUE();
+    BREAK();
+} END_OPCODE
 

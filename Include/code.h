@@ -2,6 +2,7 @@
 
 #ifndef Py_CODE_H
 #define Py_CODE_H
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -25,6 +26,7 @@ typedef struct {
     int co_firstlineno;		/* first source line number */
     PyObject *co_lnotab;	/* string (encoding addr<->lineno mapping) */
     void *co_zombieframe;     /* for optimization only (see frameobject.c) */
+    void *co_jitted;
 } PyCodeObject;
 
 /* Masks for co_flags above */

@@ -1,5 +1,7 @@
 /* -*- c-basic-offset: 4; indent-tabs-mode: nil; mode: c++ -*- */
 
+#include "JitCompiler.h"
+
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Bitcode/ReaderWriter.h>
 
@@ -28,15 +30,13 @@
 #include <stdint.h>
 #include <cstdlib>
 
-intptr_t py_id(PyObject* o) {
+static intptr_t py_id(PyObject* o) {
     return (intptr_t)o;
 }
 
-typedef PyObject* (*jitted_cfunc_t)(PyFrameObject*, PyThreadState*, int);
 
 class JITRuntime {
 public:
-  
     JITRuntime() {
         using namespace llvm;
         MemoryBuffer* buffer = MemoryBuffer::getFile("vm_runtime.bc");
@@ -123,7 +123,7 @@ public:
         delete FPM;
     }
   
-    llvm::Function* compile(PyCodeObject* co) {
+    llvm::Function* compile(PyCodeObject* co, int optimize = 1) {
         using namespace llvm;
     
         std::string fname = make_function_name(co);
@@ -134,8 +134,8 @@ public:
         func_f->setName("f");
         Value* func_tstate = func_args++;
         func_tstate->setName("tstate");
-        Value* func_rethrow = func_args++; // XXX
-        func_rethrow->setName("rethrow");
+        Value* func_throwflag = func_args++; // XXX
+        func_throwflag->setName("throwflag");
 
         std::vector<CallInst*> to_inline;
 
@@ -210,6 +210,7 @@ public:
 #           define DEFAULT_HANDLER                                      \
             if (opcode_funcs.count(opcode)) ophandler = opcode_funcs[opcode]; \
             else ophandler = opcode_unimplemented;                      \
+            assert(ophandler);                                          \
             opret = builder.CreateCall(ophandler, opcode_args.begin(), opcode_args.end()); \
             to_inline.push_back(opret);                                 \
             /*            builder.CreateCall2(check_err, ConstantInt::get(APInt(32, line)), err_var); */ \
@@ -217,6 +218,9 @@ public:
       
             switch(opcode) {
             case YIELD_VALUE: // XXX this will have to change (trace?)
+                DEFAULT_HANDLER;
+                builder.CreateBr(end_block);
+                break;
             case RETURN_VALUE:
                 DEFAULT_HANDLER;
                 builder.CreateBr(block_end_block);
@@ -274,20 +278,17 @@ public:
         Value* b_do_jump = builder.CreateICmpEQ(do_jump, ConstantInt::get(APInt(32, 1)));
         builder.CreateCondBr(b_do_jump, dispatch_block, end_block);
 
-        if (true) { // optimize
+        if (optimize) { 
             for (size_t i = 0; i < to_inline.size(); ++i) 
                 InlineFunction(to_inline[i]);
             FPM->run(*func);
         }
-        func->dump();
-      
         return func;
     }
 
-    void run(llvm::Function* func, PyFrameObject* f, PyThreadState* tstate) {
-        using namespace llvm;
+    jitted_cfunc_t get_func_pointer(llvm::Function* func) {
         jitted_cfunc_t cfunc = (jitted_cfunc_t)EE->getPointerToFunction(func);
-        cfunc(f, tstate, 0);
+        return cfunc;
     }
 
 protected:
@@ -307,11 +308,18 @@ protected:
             
         REGISTER_OPCODE(STORE_NAME);
         REGISTER_OPCODE(RETURN_VALUE);
+        REGISTER_OPCODE(YIELD_VALUE);
         REGISTER_OPCODE(LOAD_CONST);
         REGISTER_OPCODE(PRINT_ITEM);
         REGISTER_OPCODE(PRINT_NEWLINE);
         REGISTER_OPCODE(LOAD_NAME);
+        REGISTER_OPCODE(DELETE_NAME);
         REGISTER_OPCODE(COMPARE_OP);
+
+        REGISTER_OPCODE(LOAD_FAST);
+        REGISTER_OPCODE(STORE_FAST);
+        REGISTER_OPCODE(DELETE_FAST);
+        REGISTER_OPCODE(LOAD_LOCALS);
 
         REGISTER_OPCODE(POP_TOP);
         REGISTER_OPCODE(DUP_TOP);
@@ -322,6 +330,9 @@ protected:
         REGISTER_OPCODE(RAISE_VARARGS);
 
         REGISTER_OPCODE(BUILD_LIST);
+        REGISTER_OPCODE(BUILD_TUPLE);
+        REGISTER_OPCODE(BUILD_MAP);
+        REGISTER_OPCODE(LIST_APPEND);
 
         REGISTER_OPCODE(GET_ITER);
         REGISTER_OPCODE(FOR_ITER);
@@ -337,11 +348,20 @@ protected:
         REGISTER_ALIAS(CALL_FUNCTION_VAR_KW, CALL_FUNCTION_VAR);
 
         REGISTER_OPCODE(LOAD_ATTR);
+        REGISTER_OPCODE(STORE_ATTR);
 
         REGISTER_OPCODE(IMPORT_FROM);
         REGISTER_OPCODE(IMPORT_STAR);
         REGISTER_OPCODE(IMPORT_NAME);
         
+        REGISTER_OPCODE(BUILD_CLASS);
+        REGISTER_OPCODE(EXEC_STMT);
+        
+        REGISTER_OPCODE(LOAD_GLOBAL);
+        REGISTER_OPCODE(STORE_GLOBAL);
+
+        REGISTER_OPCODE(BINARY_SUBSCR);
+        REGISTER_OPCODE(STORE_SUBSCR);
             
 #       undef REGISTER_OPCODE
 #       undef REGISTER_ALIAS
@@ -373,44 +393,67 @@ protected:
     }
 };
 
+JITRuntime* jit = 0;
+
+extern "C"
+void init_jit_runtime() 
+{
+    jit = new JITRuntime();
+}
+
+extern "C"
+void finalize_jit_runtime() 
+{
+    delete jit;
+    jit = 0;
+}
+
+struct PyJittedFunc {
+    PyJittedFunc(PyCodeObject* co) {
+        printf("Compiling %s in %s\n", PyString_AS_STRING(co->co_name), PyString_AS_STRING(co->co_filename));
+        func = jit->compile(co, 0);
+        //func->dump();
+        cfunc = jit->get_func_pointer(func);
+    }
+    
+    ~PyJittedFunc() {
+        // XXX
+    }
+    
+    llvm::Function* func;
+    jitted_cfunc_t cfunc;
+};
+
+extern "C"
+jitted_cfunc_t get_jitted_function(PyCodeObject* co) 
+{
+    assert(jit);
+    if (co->co_jitted == NULL)
+        co->co_jitted = (void*) new PyJittedFunc(co);
+    return ((PyJittedFunc*)co->co_jitted)->cfunc;
+}
+
+extern "C"
+    void finalize_jitted_function(PyCodeObject* co) 
+{
+    delete (PyJittedFunc*)co->co_jitted;
+}
+
+#ifdef JIT_TEST
 
 int main() {
     JITRuntime jit;
     Py_InitializeEx(0);
-    /*
-    const char* code = 
-        "print 1\n"
-        "x = 1\n"
-        "if x == 0:\n"
-        "  print 'T'\n"
-        "else:\n"
-        "  print 'F'\n"
-        "if 1: print 'OK'\n"
-        "else: print 'NOT OK'\n"
-        "if 0: print 'NOT OK'\n"
-        "print 0 == 0\n"
-        "print 0 == 1\n"
-        "print x == 1\n"
-        "for i in [1, 2, 3]: print i\n"
-        "try:\n"
-        "  print 'A'\n"
-        "  xx = Exception\n"
-        "  print 'B'\n"
-        "  raise xx\n"
-        "  print 'NOT OK'\n"
-        "except Exception, e:\n"
-        "  print e\n"
-        ;
-    */
-    
+
     // C or C++ do not have a function "read a file into a string"????
-#define MAXCODE 1024
+#define MAXCODE 10000
     char code[MAXCODE];
     int bytes = fread(code, 1, MAXCODE-1, stdin);
     code[bytes] = 0;
     
   
     PyCodeObject* co = (PyCodeObject*)Py_CompileString(code, "<test.py>", Py_file_input);
+    assert(co);
 
     // show the bytecode
     PyObject* dis_module = PyImport_ImportModule("dis");
@@ -418,22 +461,25 @@ int main() {
     PyObject_CallFunctionObjArgs(dis, co, NULL);
 
     // show LLVM bitcode
-    llvm::Function* cf = jit.compile(co);
+    llvm::Function* cf = jit.compile(co, 0);
+    cf->dump();
 
     // try to execute function
     PyThreadState *tstate = PyThreadState_GET();
     PyObject* m = PyImport_AddModule("__main__");
     PyObject* d = PyModule_GetDict(m);
-//     PyObject* locals = PyDict_New();
-//     PyObject* globals = PyDict_New();
     PyFrameObject* f = PyFrame_New(tstate, co, d, d);
     assert(f);
     
     //PyEval_EvalFrame(f);
 
-    tstate->frame = f;
-    jit.run(cf, f, tstate);
+    {
+        tstate->frame = f;
+        jit.get_func_pointer(cf)(f, tstate, 0);
+    }
     
     Py_DECREF(f);
     Py_DECREF(co);
 }
+
+#endif

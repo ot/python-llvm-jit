@@ -6,6 +6,8 @@
 #include "Python-ast.h"
 #undef Yield /* to avoid conflict with winbase.h */
 
+#include "../JitCompiler/JitCompiler.h"
+
 #include "grammar.h"
 #include "node.h"
 #include "token.h"
@@ -165,6 +167,8 @@ Py_InitializeEx(int install_sigs)
 	if (initialized)
 		return;
 	initialized = 1;
+
+	init_jit_runtime();
 
 	if ((p = Py_GETENV("PYTHONDEBUG")) && *p != '\0')
 		Py_DebugFlag = add_flag(Py_DebugFlag, p);
@@ -495,6 +499,7 @@ Py_Finalize(void)
 #endif
 
 	call_ll_exitfuncs();
+	finalize_jit_runtime();
 }
 
 /* Create and initialize a new interpreter and thread, and return the

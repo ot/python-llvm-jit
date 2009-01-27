@@ -32,8 +32,8 @@ CC=		llvm-gcc
 CXX=		llvm-g++
 MAINCC=		@MAINCC@
 LINKCC=		@LINKCC@
-AR=		llvm-ar
-RANLIB=		llvm-ranlib
+AR=		ar
+RANLIB=		ranlib
 SVNVERSION=	@SVNVERSION@
 
 # Shell used by make (some versions default to the login shell, which is bad)
@@ -70,8 +70,9 @@ LINKFORSHARED=	# @LINKFORSHARED@
 # Extra C flags added for building the interpreter object files.
 CFLAGSFORSHARED=@CFLAGSFORSHARED@
 # C flags used for building the interpreter object files
-PY_CFLAGS=	$(CFLAGS) $(CPPFLAGS) $(CFLAGSFORSHARED) -DPy_BUILD_CORE -emit-llvm
-
+PY_CFLAGS=	$(CFLAGS) $(CPPFLAGS) $(CFLAGSFORSHARED) -DPy_BUILD_CORE #-emit-llvm
+# LLVM libraries to link
+LLVM_LDFLAGS= `llvm-config --ldflags --libs core jit native bitreader bitwriter ipo interpreter` -lstdc++.6 -lgcc_s.1
 
 # Machine-dependent subdirectories
 MACHDEP=	@MACHDEP@
@@ -327,7 +328,8 @@ LIBRARY_OBJS=	\
 		$(PYTHON_OBJS) \
 		$(MODULE_OBJS) \
 		$(SIGNAL_OBJS) \
-		$(MODOBJS)
+		$(MODOBJS) \
+		JitCompiler/JitCompiler.o
 
 #########################################################################
 # Rules
@@ -336,10 +338,10 @@ LIBRARY_OBJS=	\
 all:		$(BUILDPYTHON) oldsharedmods sharedmods
 
 # Build the interpreter
-$(BUILDPYTHON):	Modules/python.o $(LIBRARY) $(LDLIBRARY)
+$(BUILDPYTHON):	Modules/python.o $(LIBRARY) $(LDLIBRARY) vm_runtime.bc
 		llvm-ld -native -disable-internalize $(LDFLAGS) $(LINKFORSHARED) -o $@ \
 			Modules/python.o \
-			$(BLDLIBRARY) $(LIBS) $(MODLIBS) $(SYSLIBS) $(LDLAST)
+			$(BLDLIBRARY) $(LIBS) $(MODLIBS) $(SYSLIBS) $(LLVM_LDFLAGS) $(LDLAST)
 
 platform: $(BUILDPYTHON)
 	$(RUNSHARED) ./$(BUILDPYTHON) -E -c 'import sys ; from distutils.util import get_platform ; print get_platform()+"-"+sys.version[0:3]' >platform
@@ -363,6 +365,7 @@ $(LIBRARY): $(LIBRARY_OBJS)
 	$(AR) cr $@ $(PYTHON_OBJS)
 	$(AR) cr $@ $(MODULE_OBJS) $(SIGNAL_OBJS)
 	$(AR) cr $@ $(MODOBJS)
+	$(AR) cr $@ JitCompiler/JitCompiler.o
 	$(RANLIB) $@
 
 libpython$(VERSION).so: $(LIBRARY_OBJS)
@@ -502,6 +505,13 @@ Python/importdl.o: $(srcdir)/Python/importdl.c
 
 Objects/unicodectype.o:	$(srcdir)/Objects/unicodectype.c \
 				$(srcdir)/Objects/unicodetype_db.h
+
+JitCompiler/JitCompiler.o: 
+	make -C JitCompiler JitCompiler.o
+
+vm_runtime.bc: 
+	make -C JitCompiler vm_runtime.bc
+	cp JitCompiler/vm_runtime.bc .
 
 ############################################################################
 # Header files

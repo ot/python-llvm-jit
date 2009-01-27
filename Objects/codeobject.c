@@ -1,6 +1,7 @@
 #include "Python.h"
 #include "code.h"
 #include "structmember.h"
+#include "../JitCompiler/JitCompiler.h"
 
 #define NAME_CHARS \
 	"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
@@ -103,6 +104,7 @@ PyCode_New(int argcount, int nlocals, int stacksize, int flags,
 		Py_INCREF(lnotab);
 		co->co_lnotab = lnotab;
                 co->co_zombieframe = NULL;
+		co->co_jitted = NULL;
 	}
 	return co;
 }
@@ -269,6 +271,7 @@ code_dealloc(PyCodeObject *co)
         if (co->co_zombieframe != NULL)
                 PyObject_GC_Del(co->co_zombieframe);
 	PyObject_DEL(co);
+	finalize_jitted_function(co);
 }
 
 static PyObject *
