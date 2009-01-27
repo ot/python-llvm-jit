@@ -210,7 +210,7 @@ public:
         Value* b_do_jump = builder.CreateICmpEQ(do_jump, ConstantInt::get(APInt(32, 1)));
         builder.CreateCondBr(b_do_jump, dispatch_block, end_block);
 
-        func->dump();
+        //func->dump();
       
         return func;
     }
@@ -252,6 +252,7 @@ protected:
         REGISTER_OPCODE(SETUP_LOOP);
         REGISTER_ALIAS(SETUP_EXCEPT, SETUP_LOOP);
         REGISTER_ALIAS(SETUP_FINALLY, SETUP_LOOP);
+        REGISTER_OPCODE(RAISE_VARARGS);
 
         REGISTER_OPCODE(BUILD_LIST);
 
@@ -259,6 +260,11 @@ protected:
         REGISTER_OPCODE(FOR_ITER);
 
         REGISTER_OPCODE(POP_BLOCK);
+        REGISTER_OPCODE(END_FINALLY);
+
+        REGISTER_OPCODE(MAKE_FUNCTION);
+        REGISTER_OPCODE(MAKE_CLOSURE);
+        REGISTER_OPCODE(CALL_FUNCTION);
             
 #       undef REGISTER_OPCODE
 #       undef REGISTER_ALIAS
@@ -293,6 +299,7 @@ protected:
 int main() {
     JITRuntime jit;
     Py_InitializeEx(0);
+    /*
     const char* code = 
         "print 1\n"
         "x = 1\n"
@@ -309,11 +316,20 @@ int main() {
         "for i in [1, 2, 3]: print i\n"
         "try:\n"
         "  print 'A'\n"
-        "  raise Exception('x')\n"
+        "  xx = Exception\n"
+        "  print 'B'\n"
+        "  raise xx\n"
         "  print 'NOT OK'\n"
         "except Exception, e:\n"
         "  print e\n"
         ;
+    */
+    
+    // C or C++ do not have a function "read a file into a string"????
+#define MAXCODE 1024
+    char code[MAXCODE];
+    int bytes = fread(code, 1, MAXCODE-1, stdin);
+    code[bytes] = 0;
     
   
     PyCodeObject* co = (PyCodeObject*)Py_CompileString(code, "<test.py>", Py_file_input);
@@ -328,9 +344,11 @@ int main() {
 
     // try to execute function
     PyThreadState *tstate = PyThreadState_GET();
-    PyObject* locals = PyDict_New();
-    PyObject* globals = PyDict_New();
-    PyFrameObject* f = PyFrame_New(tstate, co, locals, globals);
+    PyObject* m = PyImport_AddModule("__main__");
+    PyObject* d = PyModule_GetDict(m);
+//     PyObject* locals = PyDict_New();
+//     PyObject* globals = PyDict_New();
+    PyFrameObject* f = PyFrame_New(tstate, co, d, d);
     assert(f);
     
     //PyEval_EvalFrame(f);
