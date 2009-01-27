@@ -71,7 +71,10 @@
 #define STACKADJ(n) BASIC_STACKADJ(n)
 #define EXT_POP(STACK_POINTER) (*--(STACK_POINTER))
 
-#define INSTR_OFFSET() (line+3)
+// XXX THIS IS UGLY
+#define INSTR_OFFSET() (line + (HAS_ARG(opcode) ? 3 : 1))
+// #define PEEKARG() (f->f_code->co_code[INSTR_OFFSET() + 2] << 8 + \
+//     (f->f_code->co_code[INSTR_OFFSET() + 1])
 
 #define GETITEM(v, i) PyTuple_GET_ITEM((PyTupleObject *)(v), (i))
 //#define GETITEM(v, i) PyTuple_GetItem((v), (i)) // XXX Use macro
@@ -1888,3 +1891,259 @@ OPCODE(PRINT_EXPR) {
     BREAK();
 } END_OPCODE
 
+OPCODE(UNARY_POSITIVE) {
+    v = TOP();
+    x = PyNumber_Positive(v);
+    Py_DECREF(v);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(UNARY_NEGATIVE) {
+    v = TOP();
+    x = PyNumber_Negative(v);
+    Py_DECREF(v);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(UNARY_NOT) {
+    v = TOP();
+    err = PyObject_IsTrue(v);
+    Py_DECREF(v);
+    if (err == 0) {
+        Py_INCREF(Py_True);
+        SET_TOP(Py_True);
+        CONTINUE();
+    }
+    else if (err > 0) {
+        Py_INCREF(Py_False);
+        SET_TOP(Py_False);
+        err = 0;
+        CONTINUE();
+    }
+    STACKADJ(-1);
+    BREAK();
+} END_OPCODE
+
+OPCODE(UNARY_CONVERT) {
+    v = TOP();
+    x = PyObject_Repr(v);
+    Py_DECREF(v);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(UNARY_INVERT) {
+    v = TOP();
+    x = PyNumber_Invert(v);
+    Py_DECREF(v);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(BINARY_POWER) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_Power(v, w, Py_None);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(BINARY_MULTIPLY) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_Multiply(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(BINARY_DIVIDE) {
+    if (opcode == BINARY_DIVIDE && !_Py_QnewFlag) {
+        w = POP();
+        v = TOP();
+        x = PyNumber_Divide(v, w);
+        Py_DECREF(v);
+        Py_DECREF(w);
+        SET_TOP(x);
+        if (x != NULL) CONTINUE();
+        BREAK();
+    }
+    /* -Qnew is in effect:	fall through to
+       BINARY_TRUE_DIVIDE */
+    // case BINARY_TRUE_DIVIDE:
+    w = POP();
+    v = TOP();
+    x = PyNumber_TrueDivide(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(BINARY_FLOOR_DIVIDE) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_FloorDivide(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+} END_OPCODE
+
+OPCODE(BINARY_MODULO) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_Remainder(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+static PyObject *
+string_concatenate(PyObject *v, PyObject *w,
+		   PyFrameObject *f)
+{
+	/* This function implements 'variable += expr' when both arguments
+	   are strings. */
+	Py_ssize_t v_len = PyString_GET_SIZE(v);
+	Py_ssize_t w_len = PyString_GET_SIZE(w);
+	Py_ssize_t new_len = v_len + w_len;
+	if (new_len < 0) {
+		PyErr_SetString(PyExc_OverflowError,
+				"strings are too large to concat");
+		return NULL;
+	}
+
+        // HUGE XXX 
+// 	if (v->ob_refcnt == 2) {
+// 		/* In the common case, there are 2 references to the value
+// 		 * stored in 'variable' when the += is performed: one on the
+// 		 * value stack (in 'v') and one still stored in the 'variable'.
+// 		 * We try to delete the variable now to reduce the refcnt to 1.
+// 		 */
+// 		switch (*next_instr) {
+// 		case STORE_FAST:
+// 		{
+// 			int oparg = PEEKARG();
+// 			PyObject **fastlocals = f->f_localsplus;
+// 			if (GETLOCAL(oparg) == v)
+// 				SETLOCAL(oparg, NULL);
+// 			break;
+// 		}
+// 		case STORE_DEREF:
+// 		{
+// 			PyObject **freevars = f->f_localsplus + f->f_code->co_nlocals;
+// 			PyObject *c = freevars[PEEKARG()];
+// 			if (PyCell_GET(c) == v)
+// 				PyCell_Set(c, NULL);
+// 			break;
+// 		}
+// 		case STORE_NAME:
+// 		{
+// 			PyObject *names = f->f_code->co_names;
+// 			PyObject *name = GETITEM(names, PEEKARG());
+// 			PyObject *locals = f->f_locals;
+// 			if (PyDict_CheckExact(locals) &&
+// 			    PyDict_GetItem(locals, name) == v) {
+// 				if (PyDict_DelItem(locals, name) != 0) {
+// 					PyErr_Clear();
+// 				}
+// 			}
+// 			break;
+// 		}
+// 		}
+// 	}
+
+	if (v->ob_refcnt == 1 && !PyString_CHECK_INTERNED(v)) {
+		/* Now we own the last reference to 'v', so we can resize it
+		 * in-place.
+		 */
+		if (_PyString_Resize(&v, new_len) != 0) {
+			/* XXX if _PyString_Resize() fails, 'v' has been
+			 * deallocated so it cannot be put back into 'variable'.
+			 * The MemoryError is raised when there is no value in
+			 * 'variable', which might (very remotely) be a cause
+			 * of incompatibilities.
+			 */
+			return NULL;
+		}
+		/* copy 'w' into the newly allocated area of 'v' */
+		memcpy(PyString_AS_STRING(v) + v_len,
+		       PyString_AS_STRING(w), w_len);
+		return v;
+	}
+	else {
+		/* When in-place resizing is not an option. */
+		PyString_Concat(&v, w);
+		return v;
+	}
+}
+
+OPCODE(BINARY_ADD) {
+    w = POP();
+    v = TOP();
+    if (PyInt_CheckExact(v) && PyInt_CheckExact(w)) {
+        /* INLINE: int + int */
+        register long a, b, i;
+        a = PyInt_AS_LONG(v);
+        b = PyInt_AS_LONG(w);
+        i = a + b;
+        if ((i^a) < 0 && (i^b) < 0)
+            goto slow_add;
+        x = PyInt_FromLong(i);
+    }
+    else if (PyString_CheckExact(v) &&
+             PyString_CheckExact(w)) {
+        x = string_concatenate(v, w, f);
+        /* string_concatenate consumed the ref to v */
+        goto skip_decref_vx;
+    }
+    else {
+    slow_add:
+        x = PyNumber_Add(v, w);
+    }
+    Py_DECREF(v);
+ skip_decref_vx:
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(BINARY_SUBTRACT) {
+    w = POP();
+    v = TOP();
+    if (PyInt_CheckExact(v) && PyInt_CheckExact(w)) {
+        /* INLINE: int - int */
+        register long a, b, i;
+        a = PyInt_AS_LONG(v);
+        b = PyInt_AS_LONG(w);
+        i = a - b;
+        if ((i^a) < 0 && (i^~b) < 0)
+            goto slow_sub;
+        x = PyInt_FromLong(i);
+    }
+    else {
+    slow_sub:
+        x = PyNumber_Subtract(v, w);
+    }
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
