@@ -10,12 +10,13 @@
 #include <llvm/ExecutionEngine/GenericValue.h>
 #include <llvm/DerivedTypes.h>
 #include <llvm/Support/IRBuilder.h>
-#include "llvm/Transforms/Utils/Cloning.h"
+#include <llvm/Transforms/Utils/Cloning.h>
 
 #include <llvm/PassManager.h>
 #include <llvm/Target/TargetData.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/IPO.h>
+#include <llvm/Analysis/LoopPass.h>
 
 #include "Python.h"
 #include "opcode.h"
@@ -67,13 +68,59 @@ public:
 
         MP->materializeModule(); // XXX needed for inlining?
 
+        FPM = new FunctionPassManager(MP);
+        FPM->add(new TargetData(*EE->getTargetData()));
         
+        // XXX Passes stolen from N3 VMKit -- recheck
+        FPM->add(createCFGSimplificationPass());    // Clean up disgusting code
+        FPM->add(createScalarReplAggregatesPass());// Kill useless allocas
+        FPM->add(createInstructionCombiningPass()); // Clean up after IPCP & DAE
+        FPM->add(createCFGSimplificationPass());    // Clean up after IPCP & DAE
+        FPM->add(createPromoteMemoryToRegisterPass());// Kill useless allocas
+        FPM->add(createInstructionCombiningPass()); // Clean up after IPCP & DAE
+        FPM->add(createCFGSimplificationPass());    // Clean up after IPCP & DAE
+  
+        FPM->add(createTailDuplicationPass());      // Simplify cfg by copying code
+        FPM->add(createInstructionCombiningPass()); // Cleanup for scalarrepl.
+        FPM->add(createCFGSimplificationPass());    // Merge & remove BBs
+        FPM->add(createScalarReplAggregatesPass()); // Break up aggregate allocas
+        FPM->add(createInstructionCombiningPass()); // Combine silly seq's
+        FPM->add(createCondPropagationPass());      // Propagate conditionals
+  
+   
+        FPM->add(createTailCallEliminationPass());  // Eliminate tail calls
+        FPM->add(createCFGSimplificationPass());    // Merge & remove BBs
+        FPM->add(createReassociatePass());          // Reassociate expressions
+        FPM->add(createLoopRotatePass());
+        FPM->add(createLICMPass());                 // Hoist loop invariants
+        FPM->add(createLoopUnswitchPass());         // Unswitch loops.
+        FPM->add(createInstructionCombiningPass()); // Clean up after LICM/reassoc
+        FPM->add(createIndVarSimplifyPass());       // Canonicalize indvars
+        FPM->add(createLoopUnrollPass());           // Unroll small loops
+        FPM->add(createInstructionCombiningPass()); // Clean up after the unroller
+        //addPass(PM, mvm::createArrayChecksPass()); 
+        FPM->add(createGVNPass());                  // GVN for load instructions
+        //FPM->add(createGCSEPass());                 // Remove common subexprs
+        FPM->add(createSCCPPass());                 // Constant prop with SCCP
+        FPM->add(createPredicateSimplifierPass());                
+  
+  
+        // Run instcombine after redundancy elimination to exploit opportunities
+        // opened up by them.
+        FPM->add(createInstructionCombiningPass());
+        FPM->add(createCondPropagationPass());      // Propagate conditionals
+
+        FPM->add(createDeadStoreEliminationPass()); // Delete dead stores
+        FPM->add(createAggressiveDCEPass());        // SSA based 'Aggressive DCE'
+        FPM->add(createCFGSimplificationPass());    // Merge & remove BBs
+        //addPass(PM, mvm::createLowerArrayLengthPass());
         
         register_opcodes();
     }
   
     ~JITRuntime() {
         delete EE;
+        delete FPM;
     }
   
     llvm::Function* compile(PyCodeObject* co) {
@@ -227,10 +274,10 @@ public:
         Value* b_do_jump = builder.CreateICmpEQ(do_jump, ConstantInt::get(APInt(32, 1)));
         builder.CreateCondBr(b_do_jump, dispatch_block, end_block);
 
-        for (size_t i = 0; i < to_inline.size(); ++i) {
-            printf("Inlining\n");
-            to_inline[i]->dump();
-            InlineFunction(to_inline[i]);
+        if (true) { // optimize
+            for (size_t i = 0; i < to_inline.size(); ++i) 
+                InlineFunction(to_inline[i]);
+            FPM->run(*func);
         }
         func->dump();
       
@@ -304,6 +351,7 @@ protected:
     llvm::ModuleProvider* MP;
     llvm::Module* the_module;
     llvm::ExecutionEngine* EE;
+    llvm::FunctionPassManager* FPM;
 
     std::map<int, llvm::Function*> opcode_funcs;
     llvm::Function* opcode_unimplemented;

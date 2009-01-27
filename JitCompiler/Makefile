@@ -1,4 +1,4 @@
-CXXFLAGS= -I ../Include -I ../ -fno-strict-aliasing -no-cpp-precomp -mno-fused-madd -g -fwrapv -Wall #-O3 -DNDEBUG
+CXXFLAGS= -I ../Include -I ../ -fno-strict-aliasing -no-cpp-precomp -mno-fused-madd -g -fwrapv -Wall -O3 #-DNDEBUG
 CFLAGS= $(CXXFLAGS) -Wstrict-prototypes 
 LLVM_CFLAGS=`llvm-config --cppflags`
 LLVM_LDFLAGS=`llvm-config --ldflags --libs core jit native bitreader bitwriter ipo interpreter`
