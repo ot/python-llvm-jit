@@ -73,8 +73,9 @@
 
 // XXX THIS IS UGLY
 #define INSTR_OFFSET() (line + (HAS_ARG(opcode) ? 3 : 1))
-// #define PEEKARG() (f->f_code->co_code[INSTR_OFFSET() + 2] << 8 + \
+// #define PEEKARG() (f->f_code->co_code[INSTR_OFFSET() + 2] << 8 + 
 //     (f->f_code->co_code[INSTR_OFFSET() + 1])
+//
 
 #define GETITEM(v, i) PyTuple_GET_ITEM((PyTupleObject *)(v), (i))
 //#define GETITEM(v, i) PyTuple_GetItem((v), (i)) // XXX Use macro
@@ -1279,6 +1280,17 @@ OPCODE(STORE_ATTR) {
     BREAK();
 } END_OPCODE
 
+OPCODE(DELETE_ATTR) {
+    w = GETITEM(names, oparg);
+    v = POP();
+    err = PyObject_SetAttr(v, w, (PyObject *)NULL);
+    /* del v.w */
+    Py_DECREF(v);
+    if (err == 0) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+
 OPCODE(CALL_FUNCTION_VAR) {
     int na = oparg & 0xff;
     int nk = (oparg>>8) & 0xff;
@@ -1846,6 +1858,18 @@ OPCODE(STORE_SUBSCR) {
     BREAK();
 } END_OPCODE
 
+OPCODE(DELETE_SUBSCR) {
+    w = TOP();
+    v = SECOND();
+    STACKADJ(-2);
+    /* del v[w] */
+    err = PyObject_DelItem(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    if (err == 0) CONTINUE();
+    BREAK();
+} END_OPCODE
+
 OPCODE(LIST_APPEND) {
     w = POP();
     v = POP();
@@ -2146,4 +2170,522 @@ OPCODE(BINARY_SUBTRACT) {
     SET_TOP(x);
     if (x != NULL) CONTINUE();
     BREAK();
+} END_OPCODE
+
+#undef ISINDEX
+#define ISINDEX(x) ((x) == NULL || \
+		    PyInt_Check(x) || PyLong_Check(x) || PyIndex_Check(x))
+
+static PyObject *
+apply_slice(PyObject *u, PyObject *v, PyObject *w) /* return u[v:w] */
+{
+	PyTypeObject *tp = u->ob_type;
+	PySequenceMethods *sq = tp->tp_as_sequence;
+
+	if (sq && sq->sq_slice && ISINDEX(v) && ISINDEX(w)) {
+		Py_ssize_t ilow = 0, ihigh = PY_SSIZE_T_MAX;
+		if (!_PyEval_SliceIndex(v, &ilow))
+			return NULL;
+		if (!_PyEval_SliceIndex(w, &ihigh))
+			return NULL;
+		return PySequence_GetSlice(u, ilow, ihigh);
+	}
+	else {
+		PyObject *slice = PySlice_New(v, w, NULL);
+		if (slice != NULL) {
+			PyObject *res = PyObject_GetItem(u, slice);
+			Py_DECREF(slice);
+			return res;
+		}
+		else
+			return NULL;
+	}
+}
+
+static int
+assign_slice(PyObject *u, PyObject *v, PyObject *w, PyObject *x)
+	/* u[v:w] = x */
+{
+	PyTypeObject *tp = u->ob_type;
+	PySequenceMethods *sq = tp->tp_as_sequence;
+
+	if (sq && sq->sq_ass_slice && ISINDEX(v) && ISINDEX(w)) {
+		Py_ssize_t ilow = 0, ihigh = PY_SSIZE_T_MAX;
+		if (!_PyEval_SliceIndex(v, &ilow))
+			return -1;
+		if (!_PyEval_SliceIndex(w, &ihigh))
+			return -1;
+		if (x == NULL)
+			return PySequence_DelSlice(u, ilow, ihigh);
+		else
+			return PySequence_SetSlice(u, ilow, ihigh, x);
+	}
+	else {
+		PyObject *slice = PySlice_New(v, w, NULL);
+		if (slice != NULL) {
+			int res;
+			if (x != NULL)
+				res = PyObject_SetItem(u, slice, x);
+			else
+				res = PyObject_DelItem(u, slice);
+			Py_DECREF(slice);
+			return res;
+		}
+		else
+			return -1;
+	}
+}
+
+OPCODE(SLICE) {
+    if ((opcode-SLICE) & 2)
+        w = POP();
+    else
+        w = NULL;
+    if ((opcode-SLICE) & 1)
+        v = POP();
+    else
+        v = NULL;
+    u = TOP();
+    x = apply_slice(u, v, w);
+    Py_DECREF(u);
+    Py_XDECREF(v);
+    Py_XDECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(STORE_SLICE) {
+    if ((opcode-STORE_SLICE) & 2)
+        w = POP();
+    else
+        w = NULL;
+    if ((opcode-STORE_SLICE) & 1)
+        v = POP();
+    else
+        v = NULL;
+    u = POP();
+    PyObject* t = POP();
+    err = assign_slice(u, v, w, t); /* u[v:w] = t */
+    Py_DECREF(t);
+    Py_DECREF(u);
+    Py_XDECREF(v);
+    Py_XDECREF(w);
+    if (err == 0) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(DELETE_SLICE) {
+    if ((opcode-DELETE_SLICE) & 2)
+        w = POP();
+    else
+        w = NULL;
+    if ((opcode-DELETE_SLICE) & 1)
+        v = POP();
+    else
+        v = NULL;
+    u = POP();
+    err = assign_slice(u, v, w, (PyObject *)NULL);
+    /* del u[v:w] */
+    Py_DECREF(u);
+    Py_XDECREF(v);
+    Py_XDECREF(w);
+    if (err == 0) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(ROT_TWO) {
+    v = TOP();
+    w = SECOND();
+    SET_TOP(w);
+    SET_SECOND(v);
+    CONTINUE();
+} END_OPCODE
+	
+OPCODE(ROT_THREE) {
+    v = TOP();
+    w = SECOND();
+    x = THIRD();
+    SET_TOP(w);
+    SET_SECOND(x);
+    SET_THIRD(v);
+    CONTINUE();
+} END_OPCODE
+
+OPCODE(ROT_FOUR) {
+    u = TOP();
+    v = SECOND();
+    w = THIRD();
+    x = FOURTH();
+    SET_TOP(v);
+    SET_SECOND(w);
+    SET_THIRD(x);
+    SET_FOURTH(u);
+    CONTINUE();
+} END_OPCODE
+
+OPCODE(NOP) {
+    CONTINUE();
+} END_OPCODE
+
+static int
+unpack_iterable(PyObject *v, int argcnt, PyObject **sp)
+{
+	int i = 0;
+	PyObject *it;  /* iter(v) */
+	PyObject *w;
+
+	assert(v != NULL);
+
+	it = PyObject_GetIter(v);
+	if (it == NULL)
+		goto Error;
+
+	for (; i < argcnt; i++) {
+		w = PyIter_Next(it);
+		if (w == NULL) {
+			/* Iterator done, via error or exhaustion. */
+			if (!PyErr_Occurred()) {
+				PyErr_Format(PyExc_ValueError,
+					"need more than %d value%s to unpack",
+					i, i == 1 ? "" : "s");
+			}
+			goto Error;
+		}
+		*--sp = w;
+	}
+
+	/* We better have exhausted the iterator now. */
+	w = PyIter_Next(it);
+	if (w == NULL) {
+		if (PyErr_Occurred())
+			goto Error;
+		Py_DECREF(it);
+		return 1;
+	}
+	Py_DECREF(w);
+	PyErr_SetString(PyExc_ValueError, "too many values to unpack");
+	/* fall through */
+Error:
+	for (; i > 0; i--, sp++)
+		Py_DECREF(*sp);
+	Py_XDECREF(it);
+	return 0;
+}
+
+OPCODE(UNPACK_SEQUENCE) {
+    v = POP();
+    if (PyTuple_CheckExact(v) && PyTuple_GET_SIZE(v) == oparg) {
+        PyObject **items = ((PyTupleObject *)v)->ob_item;
+        while (oparg--) {
+            w = items[oparg];
+            Py_INCREF(w);
+            PUSH(w);
+        }
+        Py_DECREF(v);
+        CONTINUE();
+    } else if (PyList_CheckExact(v) && PyList_GET_SIZE(v) == oparg) {
+        PyObject **items = ((PyListObject *)v)->ob_item;
+        while (oparg--) {
+            w = items[oparg];
+            Py_INCREF(w);
+            PUSH(w);
+        }
+    } else if (unpack_iterable(v, oparg,
+                               stack_pointer + oparg)) {
+        stack_pointer += oparg;
+        CONTINUE();
+    } else {
+        /* unpack_iterable() raised an exception */
+        why = WHY_EXCEPTION;
+    }
+    Py_DECREF(v);
+    BREAK();
+} END_OPCODE
+
+OPCODE(BREAK_LOOP) {
+    why = WHY_BREAK;
+    BREAK();
+} END_OPCODE
+
+OPCODE(BINARY_LSHIFT) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_Lshift(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(BINARY_RSHIFT) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_Rshift(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(BINARY_AND) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_And(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(BINARY_XOR) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_Xor(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(BINARY_OR) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_Or(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(INPLACE_POWER) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_InPlacePower(v, w, Py_None);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(INPLACE_MULTIPLY) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_InPlaceMultiply(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(INPLACE_DIVIDE) {
+    if (opcode == INPLACE_DIVIDE && !_Py_QnewFlag) {
+        w = POP();
+        v = TOP();
+        x = PyNumber_InPlaceDivide(v, w);
+        Py_DECREF(v);
+        Py_DECREF(w);
+        SET_TOP(x);
+        if (x != NULL) CONTINUE();
+        BREAK();
+    }
+    /* -Qnew is in effect:	fall through to
+       INPLACE_TRUE_DIVIDE */
+    // case INPLACE_TRUE_DIVIDE:
+    w = POP();
+    v = TOP();
+    x = PyNumber_InPlaceTrueDivide(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(INPLACE_FLOOR_DIVIDE) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_InPlaceFloorDivide(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(INPLACE_MODULO) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_InPlaceRemainder(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(INPLACE_ADD) {
+    w = POP();
+    v = TOP();
+    if (PyInt_CheckExact(v) && PyInt_CheckExact(w)) {
+        /* INLINE: int + int */
+        register long a, b, i;
+        a = PyInt_AS_LONG(v);
+        b = PyInt_AS_LONG(w);
+        i = a + b;
+        if ((i^a) < 0 && (i^b) < 0)
+            goto slow_iadd;
+        x = PyInt_FromLong(i);
+    }
+    else if (PyString_CheckExact(v) &&
+             PyString_CheckExact(w)) {
+        x = string_concatenate(v, w, f); // XXX 
+        /* string_concatenate consumed the ref to v */
+        goto skip_decref_v;
+    }
+    else {
+    slow_iadd:
+        x = PyNumber_InPlaceAdd(v, w);
+    }
+    Py_DECREF(v);
+ skip_decref_v:
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(INPLACE_SUBTRACT) {
+    w = POP();
+    v = TOP();
+    if (PyInt_CheckExact(v) && PyInt_CheckExact(w)) {
+        /* INLINE: int - int */
+        register long a, b, i;
+        a = PyInt_AS_LONG(v);
+        b = PyInt_AS_LONG(w);
+        i = a - b;
+        if ((i^a) < 0 && (i^~b) < 0)
+            goto slow_isub;
+        x = PyInt_FromLong(i);
+    }
+    else {
+    slow_isub:
+        x = PyNumber_InPlaceSubtract(v, w);
+    }
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(INPLACE_LSHIFT) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_InPlaceLshift(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(INPLACE_RSHIFT) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_InPlaceRshift(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(INPLACE_AND) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_InPlaceAnd(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(INPLACE_XOR) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_InPlaceXor(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(INPLACE_OR) {
+    w = POP();
+    v = TOP();
+    x = PyNumber_InPlaceOr(v, w);
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(LOAD_CLOSURE) {
+    PyObject** freevars = f->f_localsplus + f->f_code->co_nlocals;
+    x = freevars[oparg];
+    Py_INCREF(x);
+    PUSH(x);
+    if (x != NULL) CONTINUE();
+    BREAK();
+} END_OPCODE
+
+OPCODE(LOAD_DEREF) {
+    PyObject** freevars = f->f_localsplus + f->f_code->co_nlocals;
+    x = freevars[oparg];
+    w = PyCell_Get(x);
+    if (w != NULL) {
+        PUSH(w);
+        CONTINUE();
+    }
+    err = -1;
+    /* Don't stomp existing exception */
+    if (PyErr_Occurred())
+        BREAK();
+    if (oparg < PyTuple_GET_SIZE(co->co_cellvars)) {
+        v = PyTuple_GET_ITEM(co->co_cellvars,
+                             oparg);
+        format_exc_check_arg(
+                             PyExc_UnboundLocalError,
+                             UNBOUNDLOCAL_ERROR_MSG,
+                             v);
+    } else {
+        v = PyTuple_GET_ITEM(
+                             co->co_freevars,
+                             oparg - PyTuple_GET_SIZE(co->co_cellvars));
+        format_exc_check_arg(
+                             PyExc_NameError,
+                             UNBOUNDFREE_ERROR_MSG,
+                             v);
+    }
+    BREAK();
+} END_OPCODE
+
+OPCODE(STORE_DEREF) {
+    PyObject** freevars = f->f_localsplus + f->f_code->co_nlocals;
+    w = POP();
+    x = freevars[oparg];
+    PyCell_Set(x, w);
+    Py_DECREF(w);
+    CONTINUE();
 } END_OPCODE
