@@ -15,8 +15,9 @@ vm_opcodes.o: vm_opcodes.c
 	llvm-gcc --emit-llvm $(CFLAGS) vm_opcodes.c -c -o vm_opcodes.o
 
 vm_runtime.bc: vm_opcodes.o
-	make -C ../ libpython2.5.a
-	llvm-ld $(LDFLAGS) -link-as-library vm_opcodes.o ../libpython2.5.a -o vm_runtime.bc
+# 	make -C ../ libpython2.5.a
+# 	llvm-ld $(LDFLAGS) -link-as-library vm_opcodes.o ../libpython2.5.a -o vm_runtime.bc
+	cp vm_opcodes.o vm_runtime.bc
 
 llvm_compiler: llvm_compiler.cpp 
 	g++ $(CXXFLAGS) $(LLVM_CFLAGS) llvm_compiler.cpp $(LLVM_LDFLAGS) -lpython -o llvm_compiler

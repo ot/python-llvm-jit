@@ -36,7 +36,7 @@ public:
         assert(buffer);				
         MP = getBitcodeModuleProvider(buffer);
         the_module = MP->getModule();
-        EE = ExecutionEngine::create(MP, true);
+        EE = ExecutionEngine::create(MP, false);
 
         const Type* ty_pyframe = the_module->getTypeByName("struct.PyFrameObject");
         assert(ty_pyframe);
@@ -51,6 +51,7 @@ public:
 
         opcode_unimplemented = the_module->getFunction("opcode_UNIMPLEMENTED");
         check_err = the_module->getFunction("check_err");
+        is_top_true = the_module->getFunction("is_top_true");
 
         register_opcodes();
     }
@@ -69,10 +70,8 @@ public:
         func_f->setName("f");
 
         const uint8_t* bytecode = (const uint8_t*) PyString_AS_STRING(co->co_code);
-        const uint8_t* cur_instr = bytecode;
     
         BasicBlock* entry = BasicBlock::Create("entry", func);
-        BasicBlock* block_end_block = BasicBlock::Create("block_end", func);
         IRBuilder<> builder(entry);
   
         Value* err_var = builder.CreateAlloca(Type::Int32Ty, 0, "err");
@@ -81,15 +80,51 @@ public:
         builder.CreateStore(ConstantInt::get(APInt(32, 1)), why_var); // WHY_NOT
         Value* retval_var = builder.CreateAlloca(ty_pyobject_ptr,
                                                  0, "retval");
+        Value* dispatch_var = builder.CreateAlloca(Type::Int32Ty, 0, "dispatch_to_instr"); 
 
-        while (*cur_instr) {
-            unsigned int opcode = *cur_instr++;
+        BasicBlock* end_block = BasicBlock::Create("end", func);
+        builder.SetInsertPoint(end_block);
+        Value* retvalval = builder.CreateLoad(retval_var);
+        builder.CreateRet(retvalval);
+
+        // create the opcode blocks
+
+        BasicBlock* dispatch_block = BasicBlock::Create("dispatch", func);
+        builder.SetInsertPoint(dispatch_block);
+        Value* dispatch_val = builder.CreateLoad(dispatch_var);
+        SwitchInst* dispatch_switch = builder.CreateSwitch(dispatch_val, end_block);
+
+        std::map<int, BasicBlock*> opblocks; // XXX a vector would be better?
+        char opblockname[20];
+        for (const uint8_t* cur_instr = bytecode; *cur_instr; ++cur_instr) {
+            int line = cur_instr - bytecode;
+            unsigned int opcode = *cur_instr;
+            if (HAS_ARG(opcode)) cur_instr += 2;
+            
+            sprintf(opblockname, "__op_%d", line);
+            BasicBlock* opblock = BasicBlock::Create(std::string(opblockname), func);
+            
+            opblocks[line] = opblock; 
+            dispatch_switch->addCase(ConstantInt::get(APInt(32, line)), opblock);
+        }
+        builder.SetInsertPoint(entry);
+        builder.CreateBr(opblocks[0]);
+        
+        BasicBlock* block_end_block = BasicBlock::Create("block_end", func);
+
+        // fill in the opcode blocks
+        for (const uint8_t* cur_instr = bytecode; *cur_instr; ++cur_instr) {
+            int line = cur_instr - bytecode;
+            unsigned int opcode = *cur_instr;
             unsigned int oparg = 0;
             if (HAS_ARG(opcode)) {
-                unsigned int arg1 = *cur_instr++;
-                unsigned int arg2 = *cur_instr++;
+                unsigned int arg1 = *++cur_instr;
+                unsigned int arg2 = *++cur_instr;
                 oparg = (arg2 << 8) + arg1;
             }
+
+            builder.SetInsertPoint(opblocks[line]);
+
             SmallVector<Value*, 5> opcode_args;
             opcode_args.push_back(func_f);
             opcode_args.push_back(ConstantInt::get(APInt(32, opcode)));
@@ -98,33 +133,45 @@ public:
             opcode_args.push_back(why_var);
             opcode_args.push_back(retval_var);
 
-            Function* ophandler = opcode_unimplemented;
-            if (opcode_funcs.count(opcode)) {
-                ophandler = opcode_funcs[opcode];
-            }
-            builder.CreateCall(ophandler, opcode_args.begin(), opcode_args.end());
-            builder.CreateCall(check_err, err_var);
-
-            //       char opblockname[20];
-            //       sprintf(opblockname, "__op_%d", cur_instr - bytecode);
-            //       BasicBlock* opblock = BasicBlock::Create(opblockname, func);
-            //       builder.SetInsertPoint(opblock);
+            Function* ophandler;
+#           define DEFAULT_HANDLER                                      \
+            if (opcode_funcs.count(opcode)) ophandler = opcode_funcs[opcode]; \
+            else ophandler = opcode_unimplemented;                      \
+            builder.CreateCall(ophandler, opcode_args.begin(), opcode_args.end()); \
+            builder.CreateCall(check_err, err_var);                     \
+            /**/
       
             switch(opcode) {
             case RETURN_VALUE:
+                DEFAULT_HANDLER;
                 builder.CreateBr(block_end_block);
                 break;
-            default:
+            case JUMP_FORWARD: {
+                int next_line = line + 3 + oparg; // 3 is JUMP_FORWARD + oparg
+                builder.CreateBr(opblocks[next_line]);
                 break;
             }
+            case JUMP_IF_TRUE:
+            case JUMP_IF_FALSE: {
+                int true_line = line + 3;
+                int false_line = line + 3 + oparg;
+                if (opcode == JUMP_IF_TRUE) std::swap(true_line, false_line);
+                Value* cond = builder.CreateCall2(is_top_true, func_f, err_var);
+                builder.CreateCall(check_err, err_var); 
+                Value* bcond = builder.CreateICmpEQ(cond, ConstantInt::get(APInt(32, 1)));
+                builder.CreateCondBr(bcond, opblocks[true_line], opblocks[false_line]);
+                break;
+            }
+            default: {
+                DEFAULT_HANDLER;
+                int next_line = line + (HAS_ARG(opcode) ? 3 : 1);
+                builder.CreateBr(opblocks[next_line]);
+                break;
+            }
+            }
         }
-        BasicBlock* end_block = BasicBlock::Create("end", func);
         builder.SetInsertPoint(block_end_block);
         builder.CreateBr(end_block);
-        builder.SetInsertPoint(end_block);
-
-        Value* retvalval = builder.CreateLoad(retval_var);
-        builder.CreateRet(retvalval);
         func->dump();
       
         return func;
@@ -153,6 +200,9 @@ protected:
         REGISTER_OPCODE(LOAD_CONST);
         REGISTER_OPCODE(PRINT_ITEM);
         REGISTER_OPCODE(PRINT_NEWLINE);
+        REGISTER_OPCODE(LOAD_NAME);
+        REGISTER_OPCODE(COMPARE_OP);
+        REGISTER_OPCODE(POP_TOP);
             
 #       undef REGISTER_OPCODE
         
@@ -165,6 +215,7 @@ protected:
     std::map<int, llvm::Function*> opcode_funcs;
     llvm::Function* opcode_unimplemented;
     llvm::Function* check_err;
+    llvm::Function* is_top_true;
 
     const llvm::Type* ty_pyobject_ptr;
     const llvm::Type* ty_pyframe_ptr;
@@ -183,8 +234,21 @@ int main() {
     JITRuntime jit;
     Py_InitializeEx(0);
     const char* code = 
-        //"print 1\n"
-        "x = 1\n";
+        "print 1\n"
+        "x = 1\n"
+        "if x == 0:\n"
+        "  print 'T'\n"
+        "else:\n"
+        "  print 'F'\n"
+        "if 1: print 'OK'\n"
+        "else: print 'NOT OK'\n"
+        "if 0: print 'NOT OK'\n"
+        "print 0 == 0\n"
+        "print 0 == 1\n"
+        "print x == 1\n"
+        "for i in [1, 2, 3]: print i\n"
+        ;
+    
   
     PyCodeObject* co = (PyCodeObject*)Py_CompileString(code, "<test.py>", Py_file_input);
 

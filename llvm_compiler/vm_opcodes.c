@@ -28,14 +28,12 @@ enum why_code {
         PyObject* w = 0;                                                \
         PyObject* z = 0;                                                \
         PyObject* stream = 0;                                           \
-        int err = 0, why = 0;                                           \
-        PyObject* retval = 0;                                           \
+        int err = *err_out, why = *why_out;                             \
+        PyObject* retval = *retval_out;                                 \
         PyCodeObject *co = f->f_code;                                   \
         PyObject* names = co->co_names;                                 \
         PyObject* consts = co->co_consts;                               \
         PyObject **stack_pointer = f->f_stacktop;                       \
-        printf("Executing opcode %d, oparg %d\n", opcode, oparg);       \
-        fflush(stdout);                                                 \
         /**/
 
 #define END_OPCODE                                                      \
@@ -50,10 +48,25 @@ enum why_code {
     }                                                                   \
     /**/
 
-#define POP() (*--stack_pointer)
-#define PUSH(v)	(*stack_pointer++ = (v))
-//#define GETITEM(v, i) PyTuple_GET_ITEM((PyTupleObject *)(v), (i))
-#define GETITEM(v, i) PyTuple_GetItem((v), (i)) // XXX Use macro
+#define STACK_LEVEL()	((int)(stack_pointer - f->f_valuestack))
+#define EMPTY()		(STACK_LEVEL() == 0)
+#define TOP()		(stack_pointer[-1])
+#define SECOND()	(stack_pointer[-2])
+#define THIRD() 	(stack_pointer[-3])
+#define FOURTH()	(stack_pointer[-4])
+#define SET_TOP(v)	(stack_pointer[-1] = (v))
+#define SET_SECOND(v)	(stack_pointer[-2] = (v))
+#define SET_THIRD(v)	(stack_pointer[-3] = (v))
+#define SET_FOURTH(v)	(stack_pointer[-4] = (v))
+#define BASIC_STACKADJ(n)	(stack_pointer += n)
+#define BASIC_PUSH(v)	(*stack_pointer++ = (v))
+#define BASIC_POP()	(*--stack_pointer)
+
+#define POP() BASIC_POP()
+#define PUSH(v)	BASIC_PUSH(v)
+
+#define GETITEM(v, i) PyTuple_GET_ITEM((PyTupleObject *)(v), (i))
+//#define GETITEM(v, i) PyTuple_GetItem((v), (i)) // XXX Use macro
 
 OPCODE(UNIMPLEMENTED) {
     printf("Unsupported opcode %d\n", opcode);
@@ -68,10 +81,11 @@ void check_err(int* err) {
 
 OPCODE(STORE_NAME) {
     w = GETITEM(names, oparg);
+    v = POP();
     if ((x = f->f_locals) != NULL) {
-        if (PyDict_CheckExact(x)) {
+        if (PyDict_CheckExact(x))
             err = PyDict_SetItem(x, w, v);
-        } else
+        else
             err = PyObject_SetItem(x, w, v);
         Py_DECREF(v);
         return;
@@ -79,14 +93,77 @@ OPCODE(STORE_NAME) {
     PyErr_Format(PyExc_SystemError,
                  "no locals found when storing %s",
                  PyObject_REPR(w));
-} END_OPCODE
+} END_OPCODE // XXX handle error
+
+#define NAME_ERROR_MSG \
+	"name '%.200s' is not defined"
+#define GLOBAL_NAME_ERROR_MSG \
+	"global name '%.200s' is not defined"
+#define UNBOUNDLOCAL_ERROR_MSG \
+	"local variable '%.200s' referenced before assignment"
+#define UNBOUNDFREE_ERROR_MSG \
+	"free variable '%.200s' referenced before assignment" \
+        " in enclosing scope"
+
+static void
+format_exc_check_arg(PyObject *exc, char *format_str, PyObject *obj)
+{
+	char *obj_str;
+
+	if (!obj)
+		return;
+
+	obj_str = PyString_AsString(obj);
+	if (!obj_str)
+		return;
+
+	PyErr_Format(exc, format_str, obj_str);
+}
+
+OPCODE(LOAD_NAME) {
+    w = GETITEM(names, oparg);
+    err = 1;
+    if ((v = f->f_locals) == NULL) {
+        PyErr_Format(PyExc_SystemError,
+                     "no locals when loading %s",
+                     PyObject_REPR(w));
+        return;
+    }
+    if (PyDict_CheckExact(v)) {
+        x = PyDict_GetItem(v, w);
+        Py_XINCREF(x);
+    }
+    else {
+        x = PyObject_GetItem(v, w);
+        if (x == NULL && PyErr_Occurred()) {
+            if (!PyErr_ExceptionMatches(PyExc_KeyError))
+                return;
+            PyErr_Clear();
+        }
+    }
+    if (x == NULL) {
+        x = PyDict_GetItem(f->f_globals, w);
+        if (x == NULL) {
+            x = PyDict_GetItem(f->f_builtins, w);
+            if (x == NULL) {
+                format_exc_check_arg(
+                                     PyExc_NameError,
+                                     NAME_ERROR_MSG ,w);
+                return;
+            }
+        }
+        Py_INCREF(x);
+    }
+    PUSH(x);
+    err = 0;
+} END_OPCODE 
 
 OPCODE(LOAD_CONST) {
     x = GETITEM(consts, oparg);
     assert(x != 0);
     Py_INCREF(x);
     PUSH(x);
-} END_OPCODE
+} END_OPCODE // XXX check error
 
 
 OPCODE(RETURN_VALUE) {
@@ -157,3 +234,93 @@ OPCODE(PRINT_NEWLINE) {
     Py_XDECREF(stream);
     stream = NULL;
 } END_OPCODE
+
+static PyObject *
+cmp_outcome(int op, register PyObject *v, register PyObject *w)
+{
+	int res = 0;
+	switch (op) {
+	case PyCmp_IS:
+		res = (v == w);
+		break;
+	case PyCmp_IS_NOT:
+		res = (v != w);
+		break;
+	case PyCmp_IN:
+		res = PySequence_Contains(w, v);
+		if (res < 0)
+			return NULL;
+		break;
+	case PyCmp_NOT_IN:
+		res = PySequence_Contains(w, v);
+		if (res < 0)
+			return NULL;
+		res = !res;
+		break;
+	case PyCmp_EXC_MATCH:
+		res = PyErr_GivenExceptionMatches(v, w);
+		break;
+	default:
+		return PyObject_RichCompare(v, w, op);
+	}
+	v = res ? Py_True : Py_False;
+	Py_INCREF(v);
+	return v;
+}
+
+OPCODE(COMPARE_OP) {
+    w = POP();
+    v = TOP();
+    if (PyInt_CheckExact(w) && PyInt_CheckExact(v)) {
+        /* INLINE: cmp(int, int) */
+        register long a, b;
+        register int res;
+        a = PyInt_AS_LONG(v);
+        b = PyInt_AS_LONG(w);
+        switch (oparg) {
+        case PyCmp_LT: res = a <  b; break;
+        case PyCmp_LE: res = a <= b; break;
+        case PyCmp_EQ: res = a == b; break;
+        case PyCmp_NE: res = a != b; break;
+        case PyCmp_GT: res = a >  b; break;
+        case PyCmp_GE: res = a >= b; break;
+        case PyCmp_IS: res = v == w; break;
+        case PyCmp_IS_NOT: res = v != w; break;
+        default: goto slow_compare;
+        }
+        x = res ? Py_True : Py_False;
+        Py_INCREF(x);
+    }
+    else {
+    slow_compare:
+        x = cmp_outcome(oparg, v, w);
+    }
+    Py_DECREF(v);
+    Py_DECREF(w);
+    SET_TOP(x);
+    if (!x) err = 1; // XXX 
+
+} END_OPCODE
+
+OPCODE(POP_TOP) {
+    v = POP();
+    Py_DECREF(v);
+} END_OPCODE
+
+int is_top_true(PyFrameObject* f, int* err) {
+    PyObject* w = f->f_stacktop[-1];
+    if (w == Py_True)
+        return 1;
+    else if (w == Py_False) 
+        return 0;
+    else {
+        *err = PyObject_IsTrue(w);
+        if (*err > 0) {
+            *err = 0;
+            return 1;
+        } else if (*err == 0) {
+            return 0;
+        }
+    }
+    return 0; // err is nonzero
+} 
