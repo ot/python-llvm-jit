@@ -45,13 +45,18 @@ public:
         const Type* ty_pyobject = the_module->getTypeByName("struct.PyObject");
         ty_pyobject_ptr = PointerType::getUnqual(ty_pyobject);
 
+        const Type* ty_pythreadstate = the_module->getTypeByName("struct.PyThreadState");
+        ty_pythreadstate_ptr = PointerType::getUnqual(ty_pythreadstate);
+
         std::vector<const Type*> func_args;
         func_args.push_back(ty_pyframe_ptr);
+        func_args.push_back(ty_pythreadstate_ptr);
         ty_jitted_function = FunctionType::get(ty_pyobject_ptr, func_args, false); // XXX return type
 
         opcode_unimplemented = the_module->getFunction("opcode_UNIMPLEMENTED");
         check_err = the_module->getFunction("check_err");
         is_top_true = the_module->getFunction("is_top_true");
+        unwind_stack = the_module->getFunction("unwind_stack");
 
         register_opcodes();
     }
@@ -66,8 +71,11 @@ public:
         std::string fname = make_function_name(co);
         // XXX check if function already exists
         Function* func = Function::Create(ty_jitted_function, Function::ExternalLinkage, fname.c_str(), the_module);
-        Value* func_f = func->arg_begin();
+        Function::arg_iterator func_args = func->arg_begin();
+        Value* func_f = func_args++;
         func_f->setName("f");
+        Value* func_tstate = func_args++;
+        func_tstate->setName("tstate");
 
         const uint8_t* bytecode = (const uint8_t*) PyString_AS_STRING(co->co_code);
     
@@ -136,11 +144,12 @@ public:
 
             Function* ophandler;
             Value* opret;
+            Value* b_opret;
 #           define DEFAULT_HANDLER                                      \
             if (opcode_funcs.count(opcode)) ophandler = opcode_funcs[opcode]; \
             else ophandler = opcode_unimplemented;                      \
             opret = builder.CreateCall(ophandler, opcode_args.begin(), opcode_args.end()); \
-            builder.CreateCall2(check_err, ConstantInt::get(APInt(32, line)), err_var);                \
+            /*            builder.CreateCall2(check_err, ConstantInt::get(APInt(32, line)), err_var); */ \
             /**/
       
             switch(opcode) {
@@ -181,22 +190,36 @@ public:
             default: {
                 DEFAULT_HANDLER;
                 int next_line = line + (HAS_ARG(opcode) ? 3 : 1);
-                builder.CreateBr(opblocks[next_line]);
+                b_opret = builder.CreateICmpEQ(opret, ConstantInt::get(APInt(32, 1)));
+                builder.CreateCondBr(b_opret, opblocks[next_line], block_end_block);
                 break;
             }
             }
         }
         builder.SetInsertPoint(block_end_block);
-        builder.CreateBr(end_block);
+
+        std::vector<Value*> args;
+        args.push_back(func_f);
+        args.push_back(func_tstate);
+        args.push_back(err_var);
+        args.push_back(why_var);
+        args.push_back(retval_var);
+        args.push_back(dispatch_var);
+        
+        Value* do_jump = builder.CreateCall(unwind_stack, args.begin(), args.end());
+        Value* b_do_jump = builder.CreateICmpEQ(do_jump, ConstantInt::get(APInt(32, 1)));
+        builder.CreateCondBr(b_do_jump, dispatch_block, end_block);
+
         func->dump();
       
         return func;
     }
 
-    void run(llvm::Function* func, PyFrameObject* f) {
+    void run(llvm::Function* func, PyFrameObject* f, PyThreadState* tstate) {
         using namespace llvm;
         std::vector<GenericValue> args;
         args.push_back(GenericValue((void*)f));
+        args.push_back(GenericValue((void*)tstate));
         EE->runFunction(func, args);
     }
 
@@ -222,7 +245,9 @@ protected:
         REGISTER_OPCODE(PRINT_NEWLINE);
         REGISTER_OPCODE(LOAD_NAME);
         REGISTER_OPCODE(COMPARE_OP);
+
         REGISTER_OPCODE(POP_TOP);
+        REGISTER_OPCODE(DUP_TOP);
 
         REGISTER_OPCODE(SETUP_LOOP);
         REGISTER_ALIAS(SETUP_EXCEPT, SETUP_LOOP);
@@ -248,9 +273,12 @@ protected:
     llvm::Function* opcode_unimplemented;
     llvm::Function* check_err;
     llvm::Function* is_top_true;
+    llvm::Function* unwind_stack;
 
     const llvm::Type* ty_pyobject_ptr;
     const llvm::Type* ty_pyframe_ptr;
+    const llvm::Type* ty_pythreadstate_ptr;
+
     llvm::FunctionType* ty_jitted_function;
 
     std::string make_function_name(PyCodeObject* co) {
@@ -279,6 +307,12 @@ int main() {
         "print 0 == 1\n"
         "print x == 1\n"
         "for i in [1, 2, 3]: print i\n"
+        "try:\n"
+        "  print 'A'\n"
+        "  raise Exception('x')\n"
+        "  print 'NOT OK'\n"
+        "except Exception, e:\n"
+        "  print e\n"
         ;
     
   
@@ -299,8 +333,10 @@ int main() {
     PyFrameObject* f = PyFrame_New(tstate, co, locals, globals);
     assert(f);
     
-    //    PyEval_EvalFrame(f);
-    jit.run(cf, f);
+    //PyEval_EvalFrame(f);
+
+    tstate->frame = f;
+    jit.run(cf, f, tstate);
     
     Py_DECREF(f);
     Py_DECREF(co);

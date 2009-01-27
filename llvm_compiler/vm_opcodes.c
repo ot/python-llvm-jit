@@ -36,7 +36,7 @@ enum why_code {
         PyObject **stack_pointer = f->f_stacktop;                       \
         int ret = 1;                                                    \
         /**/
-        //        printf("Executing opcode %d with oparg %d\n", opcode, oparg); \
+        //        printf("Executing opcode %d with oparg %d\n", opcode, oparg); 
 
 #define END_OPCODE                                                      \
     end:                                                                \
@@ -44,6 +44,7 @@ enum why_code {
         *why_out = why;                                                 \
         *retval_out = retval;                                           \
         f->f_stacktop = stack_pointer;                                  \
+        f->f_lasti = line;                                              \
         /* to silent down the warnings */                               \
         (void)v; (void)x; (void)y; (void)w; (void)z;                    \
         (void)stream;                                                   \
@@ -79,7 +80,7 @@ enum why_code {
 #define PUSH(v)	BASIC_PUSH(v)
 #define STACKADJ(n) BASIC_STACKADJ(n)
 
-#define INSTR_OFFSET() line
+#define INSTR_OFFSET() (line+3)
 
 //#define GETITEM(v, i) PyTuple_GET_ITEM((PyTupleObject *)(v), (i))
 #define GETITEM(v, i) PyTuple_GetItem((v), (i)) // XXX Use macro
@@ -332,6 +333,12 @@ OPCODE(POP_TOP) {
     CONTINUE();
 } END_OPCODE
 
+OPCODE(DUP_TOP) {
+    v = TOP();
+    Py_INCREF(v);
+    PUSH(v);
+} END_OPCODE
+
 int is_top_true(PyFrameObject* f, int* err) {
     PyObject* w = f->f_stacktop[-1];
     if (w == Py_True)
@@ -409,3 +416,209 @@ OPCODE(POP_BLOCK) {
     CONTINUE();
 } END_OPCODE
 
+static int
+call_trace(Py_tracefunc func, PyObject *obj, PyFrameObject *frame,
+	   int what, PyObject *arg)
+{
+	register PyThreadState *tstate = frame->f_tstate;
+	int result;
+	if (tstate->tracing)
+		return 0;
+	tstate->tracing++;
+	tstate->use_tracing = 0;
+	result = func(obj, frame, what, arg);
+	tstate->use_tracing = ((tstate->c_tracefunc != NULL)
+			       || (tstate->c_profilefunc != NULL));
+	tstate->tracing--;
+	return result;
+}
+
+static void
+call_exc_trace(Py_tracefunc func, PyObject *self, PyFrameObject *f)
+{
+	PyObject *type, *value, *traceback, *arg;
+	int err;
+	PyErr_Fetch(&type, &value, &traceback);
+	if (value == NULL) {
+		value = Py_None;
+		Py_INCREF(value);
+	}
+	arg = PyTuple_Pack(3, type, value, traceback);
+	if (arg == NULL) {
+		PyErr_Restore(type, value, traceback);
+		return;
+	}
+	err = call_trace(func, self, f, PyTrace_EXCEPTION, arg);
+	Py_DECREF(arg);
+	if (err == 0)
+		PyErr_Restore(type, value, traceback);
+	else {
+		Py_XDECREF(type);
+		Py_XDECREF(value);
+		Py_XDECREF(traceback);
+	}
+}
+
+static void
+set_exc_info(PyThreadState *tstate,
+	     PyObject *type, PyObject *value, PyObject *tb)
+{
+	PyFrameObject *frame = tstate->frame;
+	PyObject *tmp_type, *tmp_value, *tmp_tb;
+
+	assert(type != NULL);
+	assert(frame != NULL);
+	if (frame->f_exc_type == NULL) {
+		assert(frame->f_exc_value == NULL);
+		assert(frame->f_exc_traceback == NULL);
+		/* This frame didn't catch an exception before. */
+		/* Save previous exception of this thread in this frame. */
+		if (tstate->exc_type == NULL) {
+			/* XXX Why is this set to Py_None? */
+			Py_INCREF(Py_None);
+			tstate->exc_type = Py_None;
+		}
+		Py_INCREF(tstate->exc_type);
+		Py_XINCREF(tstate->exc_value);
+		Py_XINCREF(tstate->exc_traceback);
+		frame->f_exc_type = tstate->exc_type;
+		frame->f_exc_value = tstate->exc_value;
+		frame->f_exc_traceback = tstate->exc_traceback;
+	}
+	/* Set new exception for this thread. */
+	tmp_type = tstate->exc_type;
+	tmp_value = tstate->exc_value;
+	tmp_tb = tstate->exc_traceback;
+	Py_INCREF(type);
+	Py_XINCREF(value);
+	Py_XINCREF(tb);
+	tstate->exc_type = type;
+	tstate->exc_value = value;
+	tstate->exc_traceback = tb;
+	Py_XDECREF(tmp_type);
+	Py_XDECREF(tmp_value);
+	Py_XDECREF(tmp_tb);
+	/* For b/w compatibility */
+	PySys_SetObject("exc_type", type);
+	PySys_SetObject("exc_value", value);
+	PySys_SetObject("exc_traceback", tb);
+}
+
+
+int unwind_stack(PyFrameObject* f, PyThreadState* tstate, int* err_out, int* why_out, PyObject** retval_out, int* jump_to) {
+    int ret = 0;
+    PyObject** stack_pointer = f->f_stacktop;
+    int err = *err_out;
+    int why = *why_out;
+    PyObject* retval = *retval_out;
+
+    PyObject* v;
+    
+    if (why == WHY_NOT) {
+        why = WHY_EXCEPTION;
+        err = 0;
+    }
+    
+    /* Log traceback info if this is a real exception */
+    
+    if (why == WHY_EXCEPTION) {
+        // XXX this is not under fast_block_end
+        PyTraceBack_Here(f);
+        
+        if (tstate->c_tracefunc != NULL)
+            call_exc_trace(tstate->c_tracefunc,
+                           tstate->c_traceobj, f);
+    }
+
+    if (why == WHY_RERAISE)
+        why = WHY_EXCEPTION;
+    
+    // fast_block_end:
+    while (why != WHY_NOT && f->f_iblock > 0) {
+        PyTryBlock *b = PyFrame_BlockPop(f);
+
+        assert(why != WHY_YIELD);
+        if (b->b_type == SETUP_LOOP && why == WHY_CONTINUE) {
+            /* For a continue inside a try block,
+               don't pop the block for the loop. */
+            PyFrame_BlockSetup(f, b->b_type, b->b_handler,
+                               b->b_level);
+            why = WHY_NOT;
+            *jump_to = PyInt_AS_LONG(retval);
+            Py_DECREF(retval);
+            break;
+        }
+
+        while (STACK_LEVEL() > b->b_level) {
+            v = POP();
+            Py_XDECREF(v);
+        }
+        if (b->b_type == SETUP_LOOP && why == WHY_BREAK) {
+            why = WHY_NOT;
+            *jump_to = b->b_handler;
+            break;
+        }
+        if (b->b_type == SETUP_FINALLY ||
+            (b->b_type == SETUP_EXCEPT &&
+             why == WHY_EXCEPTION)) {
+            if (why == WHY_EXCEPTION) {
+                PyObject *exc, *val, *tb;
+                PyErr_Fetch(&exc, &val, &tb);
+                if (val == NULL) {
+                    val = Py_None;
+                    Py_INCREF(val);
+                }
+                /* Make the raw exception data
+                   available to the handler,
+                   so a program can emulate the
+                   Python main loop.  Don't do
+                   this for 'finally'. */
+                if (b->b_type == SETUP_EXCEPT) {
+                    PyErr_NormalizeException(
+                                             &exc, &val, &tb);
+                    set_exc_info(tstate,
+                                 exc, val, tb);
+                }
+                if (tb == NULL) {
+                    Py_INCREF(Py_None);
+                    PUSH(Py_None);
+                } else
+                    PUSH(tb);
+                PUSH(val);
+                PUSH(exc);
+            }
+            else {
+                if (why & (WHY_RETURN | WHY_CONTINUE))
+                    PUSH(retval);
+                v = PyInt_FromLong((long)why);
+                PUSH(v);
+            }
+            why = WHY_NOT;
+            *jump_to = b->b_handler;
+            break;
+        }
+    } /* unwind stack */
+    
+    if (why == WHY_NOT) {
+        CONTINUE();
+    }
+
+    assert(why != WHY_YIELD);
+    /* Pop remaining stack entries. */
+    while (!EMPTY()) {
+        v = POP();
+        Py_XDECREF(v);
+    }
+
+    if (why != WHY_RETURN)
+        retval = NULL;
+
+    BREAK();
+
+ end:
+    *retval_out = retval;
+    *err_out = err;
+    *why_out = why;
+    f->f_stacktop = stack_pointer;
+    return ret;
+}
