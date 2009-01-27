@@ -72,6 +72,7 @@ public:
         FPM->add(new TargetData(*EE->getTargetData()));
         
         // XXX Passes stolen from N3 VMKit -- recheck
+        /*
         FPM->add(createCFGSimplificationPass());    // Clean up disgusting code
         FPM->add(createScalarReplAggregatesPass());// Kill useless allocas
         FPM->add(createInstructionCombiningPass()); // Clean up after IPCP & DAE
@@ -114,7 +115,24 @@ public:
         FPM->add(createAggressiveDCEPass());        // SSA based 'Aggressive DCE'
         FPM->add(createCFGSimplificationPass());    // Merge & remove BBs
         //addPass(PM, mvm::createLowerArrayLengthPass());
-        
+        */
+
+        // mem2reg
+        FPM->add(createPromoteMemoryToRegisterPass());
+        // Do simple "peephole" optimizations and bit-twiddling optzns.
+        FPM->add(createInstructionCombiningPass());
+        // Dead code Elimination
+        FPM->add(createDeadCodeEliminationPass());
+        // XXX opt 
+        // TailDuplication
+//         FPM->add(createTailDuplicationPass());
+//         // BlockPlacement
+//         FPM->add(createBlockPlacementPass());
+//         // Reassociate expressions.
+//         FPM->add(createReassociatePass());
+//         // Simplify the control flow graph (deleting unreachable blocks, etc).
+//         FPM->add(createCFGSimplificationPass());
+
         register_opcodes();
     }
   
@@ -486,7 +504,7 @@ void finalize_jit_runtime()
 struct PyJittedFunc {
     PyJittedFunc(PyCodeObject* co) {
         printf("Compiling %s in %s\n", PyString_AS_STRING(co->co_name), PyString_AS_STRING(co->co_filename));
-        func = jit->compile(co, 0);
+        func = jit->compile(co, 1);
         //func->dump();
         cfunc = jit->get_func_pointer(func);
     }
@@ -536,7 +554,7 @@ int main() {
     PyObject_CallFunctionObjArgs(dis, co, NULL);
 
     // show LLVM bitcode
-    llvm::Function* cf = jit.compile(co, 0);
+    llvm::Function* cf = jit.compile(co, 1);
     cf->dump();
 
     // try to execute function
