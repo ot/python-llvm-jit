@@ -28,8 +28,6 @@
 
 #define END_OPCODE                                                      \
     end:                                                                \
-    /* f->f_stacktop = stack_pointer; */                                \
-    /* f->f_lasti = line; */                                            \
         /* to silent down the warnings */                               \
         (void)v; (void)x; (void)y; (void)w; (void)z;                    \
         (void)u; (void)stream; (void)err;                               \
@@ -98,6 +96,10 @@ PyObject** get_stack_pointer(PyFrameObject* f) {
 
 void set_stack_pointer(PyFrameObject* f, PyObject** sp) {
     f->f_stacktop = sp;
+}
+
+void set_lasti(PyFrameObject* f, int lasti) {
+    f->f_lasti = lasti;
 }
 
 OPCODE(UNIMPLEMENTED) {

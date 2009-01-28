@@ -211,6 +211,7 @@ public:
             dispatch_switch->addCase(ConstantInt::get(APInt(32, line)), opblock);
         }
         
+        BasicBlock* fill_lasti_block = BasicBlock::Create("fill_lasti", func);
         BasicBlock* block_end_block = BasicBlock::Create("block_end", func);
 
         // if throwflag goto block_end else opcode0
@@ -234,7 +235,7 @@ public:
 
             builder.SetInsertPoint(opblocks[line]);
 
-            SmallVector<Value*, 5> opcode_args;
+            SmallVector<Value*, 7> opcode_args;
             opcode_args.push_back(func_f);
             opcode_args.push_back(sp_var);
             opcode_args.push_back(ConstantInt::get(APInt(32, line)));
@@ -256,12 +257,9 @@ public:
       
             switch(opcode) {
             case YIELD_VALUE: // XXX this will have to change (trace?)
-                DEFAULT_HANDLER;
-                builder.CreateBr(end_block);
-                break;
             case RETURN_VALUE:
                 DEFAULT_HANDLER;
-                builder.CreateBr(block_end_block);
+                builder.CreateBr(fill_lasti_block);
                 break;
             case JUMP_FORWARD: {
                 int next_line = line + 3 + oparg; // 3 is JUMP_FORWARD + oparg
@@ -285,7 +283,7 @@ public:
 
             case FOR_ITER: {
                 opret = builder.CreateCall(opcode_funcs[opcode], opcode_args.begin(), opcode_args.end());
-                SwitchInst* sw = builder.CreateSwitch(opret, block_end_block);
+                SwitchInst* sw = builder.CreateSwitch(opret, fill_lasti_block);
                 sw->addCase(ConstantInt::get(APInt(32, 0)), block_end_block); // error
                 sw->addCase(ConstantInt::get(APInt(32, 1)), opblocks[line + 3]); // continue loop
                 sw->addCase(ConstantInt::get(APInt(32, 2)), opblocks[line + 3 + oparg]); // end loop
@@ -296,14 +294,27 @@ public:
                 DEFAULT_HANDLER;
                 int next_line = line + (HAS_ARG(opcode) ? 3 : 1);
                 b_opret = builder.CreateICmpEQ(opret, ConstantInt::get(APInt(32, 1)));
-                builder.CreateCondBr(b_opret, opblocks[next_line], block_end_block);
+                builder.CreateCondBr(b_opret, opblocks[next_line], fill_lasti_block);
                 break;
             }
             }
         }
-        builder.SetInsertPoint(block_end_block);
+        
+        builder.SetInsertPoint(fill_lasti_block);
+        PHINode* lasti = builder.CreatePHI(Type::Int32Ty, "lasti");
+        for (std::map<int, BasicBlock*>::const_iterator B = opblocks.begin();
+             B != opblocks.end();
+             ++B)
+            lasti->addIncoming(ConstantInt::get(APInt(32, B->first)), B->second);
+        
+        CallInst* sli = builder.CreateCall2(the_module->getFunction("set_lasti"),
+                                            func_f,
+                                            lasti);
+        to_inline.push_back(sli);
+        builder.CreateBr(block_end_block);
 
-        std::vector<Value*> args;
+        builder.SetInsertPoint(block_end_block);
+        SmallVector<Value*, 6> args;
         args.push_back(func_f);
         args.push_back(sp_var);
         args.push_back(func_tstate);
@@ -312,7 +323,7 @@ public:
         args.push_back(dispatch_var);
         
         CallInst* do_jump = builder.CreateCall(unwind_stack, args.begin(), args.end());
-        to_inline.push_back(do_jump);
+        //to_inline.push_back(do_jump);
         Value* b_do_jump = builder.CreateICmpEQ(do_jump, ConstantInt::get(APInt(32, 1)));
         builder.CreateCondBr(b_do_jump, dispatch_block, end_block);
 
