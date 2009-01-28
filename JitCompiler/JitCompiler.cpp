@@ -71,7 +71,7 @@ public:
         FPM->add(new TargetData(*EE->getTargetData()));
         
         // XXX Passes stolen from N3 VMKit -- recheck
-        /*
+
         FPM->add(createCFGSimplificationPass());    // Clean up disgusting code
         FPM->add(createScalarReplAggregatesPass());// Kill useless allocas
         FPM->add(createInstructionCombiningPass()); // Clean up after IPCP & DAE
@@ -114,16 +114,16 @@ public:
         FPM->add(createAggressiveDCEPass());        // SSA based 'Aggressive DCE'
         FPM->add(createCFGSimplificationPass());    // Merge & remove BBs
         //addPass(PM, mvm::createLowerArrayLengthPass());
-        */
+
 
         // mem2reg
-        FPM->add(createPromoteMemoryToRegisterPass());
-        // Do simple "peephole" optimizations and bit-twiddling optzns.
-        FPM->add(createInstructionCombiningPass());
-        // Dead code Elimination
-        FPM->add(createDeadCodeEliminationPass());
-        // XXX opt 
-        // TailDuplication
+//         FPM->add(createPromoteMemoryToRegisterPass());
+//         // Do simple "peephole" optimizations and bit-twiddling optzns.
+//         FPM->add(createInstructionCombiningPass());
+//         // Dead code Elimination
+//         FPM->add(createDeadCodeEliminationPass());
+//         // XXX opt 
+//         // TailDuplication
 //         FPM->add(createTailDuplicationPass());
 //         // BlockPlacement
 //         FPM->add(createBlockPlacementPass());
@@ -167,6 +167,21 @@ public:
         builder.CreateStore(ConstantInt::get(APInt(32, WHY_NOT)), why_var); 
         Value* retval_var = builder.CreateAlloca(ty_pyobject_ptr,
                                                  0, "retval");
+
+        Value* sp_var = builder.CreateAlloca(PointerType::getUnqual(ty_pyobject_ptr),
+                                                 0, "stack_pointer");
+        {
+            // initialize the stack pointer
+            CallInst* sp = builder.CreateCall(the_module->getFunction("get_stack_pointer"),
+                                           func_f);
+            builder.CreateStore(sp, sp_var);
+            CallInst* ssp = builder.CreateCall2(the_module->getFunction("set_stack_pointer"),
+                                                func_f,
+                                                ConstantPointerNull::get(PointerType::getUnqual(ty_pyobject_ptr)));
+            to_inline.push_back(sp);
+            to_inline.push_back(ssp);
+        }
+
         Value* dispatch_var = builder.CreateAlloca(Type::Int32Ty, 0, "dispatch_to_instr"); 
         
         BasicBlock* end_block = BasicBlock::Create("end", func);
@@ -221,6 +236,7 @@ public:
 
             SmallVector<Value*, 5> opcode_args;
             opcode_args.push_back(func_f);
+            opcode_args.push_back(sp_var);
             opcode_args.push_back(ConstantInt::get(APInt(32, line)));
             opcode_args.push_back(ConstantInt::get(APInt(32, opcode)));
             opcode_args.push_back(ConstantInt::get(APInt(32, oparg)));
@@ -261,7 +277,7 @@ public:
                 int true_line = line + 3;
                 int false_line = line + 3 + oparg;
                 if (opcode == JUMP_IF_TRUE) std::swap(true_line, false_line);
-                Value* cond = builder.CreateCall(is_top_true, func_f);
+                Value* cond = builder.CreateCall2(is_top_true, func_f, sp_var);
                 Value* bcond = builder.CreateICmpEQ(cond, ConstantInt::get(APInt(32, 1)));
                 builder.CreateCondBr(bcond, opblocks[true_line], opblocks[false_line]);
                 break;
@@ -289,12 +305,14 @@ public:
 
         std::vector<Value*> args;
         args.push_back(func_f);
+        args.push_back(sp_var);
         args.push_back(func_tstate);
         args.push_back(why_var);
         args.push_back(retval_var);
         args.push_back(dispatch_var);
         
-        Value* do_jump = builder.CreateCall(unwind_stack, args.begin(), args.end());
+        CallInst* do_jump = builder.CreateCall(unwind_stack, args.begin(), args.end());
+        to_inline.push_back(do_jump);
         Value* b_do_jump = builder.CreateICmpEQ(do_jump, ConstantInt::get(APInt(32, 1)));
         builder.CreateCondBr(b_do_jump, dispatch_block, end_block);
 

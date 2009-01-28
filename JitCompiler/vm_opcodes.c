@@ -10,7 +10,7 @@
 #include <stdlib.h>
 
 #define OPCODE(OPCODENAME)                                                  \
-    int opcode_##OPCODENAME (PyFrameObject* f, int line, int opcode, int oparg, int* why, PyObject** retval) { \
+    int opcode_##OPCODENAME (PyFrameObject* f, PyObject*** stack_pointer,int line, int opcode, int oparg, int* why, PyObject** retval) { \
         int err = 0;                                                    \
         PyObject* v = 0;                                                \
         PyObject* x = Py_None;                                          \
@@ -22,15 +22,14 @@
         PyCodeObject *co = f->f_code;                                   \
         PyObject* names = co->co_names;                                 \
         PyObject* consts = co->co_consts;                               \
-        PyObject **stack_pointer = f->f_stacktop;                       \
         int ret = 1;                                                    \
         /**/
         //        printf("Executing opcode %d with oparg %d\n", opcode, oparg); 
 
 #define END_OPCODE                                                      \
     end:                                                                \
-        f->f_stacktop = stack_pointer;                                  \
-        f->f_lasti = line;                                              \
+    /* f->f_stacktop = stack_pointer; */                                \
+    /* f->f_lasti = line; */                                            \
         /* to silent down the warnings */                               \
         (void)v; (void)x; (void)y; (void)w; (void)z;                    \
         (void)u; (void)stream; (void)err;                               \
@@ -48,19 +47,19 @@
 #define BREAK() RETURN(0)
 #define CONTINUE() RETURN(1)
 
-#define STACK_LEVEL()	((int)(stack_pointer - f->f_valuestack))
+#define STACK_LEVEL()	((int)((*stack_pointer) - f->f_valuestack))
 #define EMPTY()		(STACK_LEVEL() == 0)
-#define TOP()		(stack_pointer[-1])
-#define SECOND()	(stack_pointer[-2])
-#define THIRD() 	(stack_pointer[-3])
-#define FOURTH()	(stack_pointer[-4])
-#define SET_TOP(v)	(stack_pointer[-1] = (v))
-#define SET_SECOND(v)	(stack_pointer[-2] = (v))
-#define SET_THIRD(v)	(stack_pointer[-3] = (v))
-#define SET_FOURTH(v)	(stack_pointer[-4] = (v))
-#define BASIC_STACKADJ(n)	(stack_pointer += n)
-#define BASIC_PUSH(v)	(*stack_pointer++ = (v))
-#define BASIC_POP()	(*--stack_pointer)
+#define TOP()		((*stack_pointer)[-1])
+#define SECOND()	((*stack_pointer)[-2])
+#define THIRD() 	((*stack_pointer)[-3])
+#define FOURTH()	((*stack_pointer)[-4])
+#define SET_TOP(v)	((*stack_pointer)[-1] = (v))
+#define SET_SECOND(v)	((*stack_pointer)[-2] = (v))
+#define SET_THIRD(v)	((*stack_pointer)[-3] = (v))
+#define SET_FOURTH(v)	((*stack_pointer)[-4] = (v))
+#define BASIC_STACKADJ(n)	((*stack_pointer) += n)
+#define BASIC_PUSH(v)	(*(*stack_pointer)++ = (v))
+#define BASIC_POP()	(*--(*stack_pointer))
 
 #define POP() BASIC_POP()
 #define PUSH(v)	BASIC_PUSH(v)
@@ -91,6 +90,15 @@ static PyObject * load_args(PyObject ***, int);
 
 #define PCALL(x)
 #define READ_TIMESTAMP(x)
+
+// don't want to get my hands dirty with pointer arithmetic
+PyObject** get_stack_pointer(PyFrameObject* f) {
+    return f->f_stacktop; 
+}
+
+void set_stack_pointer(PyFrameObject* f, PyObject** sp) {
+    f->f_stacktop = sp;
+}
 
 OPCODE(UNIMPLEMENTED) {
     PyErr_Format(PyExc_SystemError,
@@ -341,9 +349,9 @@ OPCODE(DUP_TOP) {
     CONTINUE();
 } END_OPCODE
 
-int is_top_true(PyFrameObject* f) {
+int is_top_true(PyFrameObject* f, PyObject*** stack_pointer) {
     int err = 0;
-    PyObject* w = f->f_stacktop[-1];
+    PyObject* w = TOP();
     if (w == Py_True)
         return 1;
     else if (w == Py_False) 
@@ -661,11 +669,13 @@ set_exc_info(PyThreadState *tstate,
 }
 
 
-int unwind_stack(PyFrameObject* f, PyThreadState* tstate, int* why, PyObject** retval, int* jump_to) {
+int unwind_stack(PyFrameObject* f, PyObject*** stack_pointer, PyThreadState* tstate, int* why, PyObject** retval, int* jump_to) {
     int ret = 0;
-    PyObject** stack_pointer = f->f_stacktop;
 
     PyObject* v;
+    
+    if (*why == WHY_YIELD)
+        BREAK();
     
     if (*why == WHY_NOT) {
         *why = WHY_EXCEPTION;
@@ -768,7 +778,6 @@ int unwind_stack(PyFrameObject* f, PyThreadState* tstate, int* why, PyObject** r
     BREAK();
 
  end:
-    f->f_stacktop = stack_pointer;
     return ret;
 }
 
@@ -1182,7 +1191,7 @@ ext_do_call(PyObject *func, PyObject ***pp_stack, int flags, int na, int nk)
 
 
 OPCODE(CALL_FUNCTION) {
-    x = call_function(&stack_pointer, oparg);
+    x = call_function(&(*stack_pointer), oparg);
     PUSH(x);
     if (x != NULL)
         CONTINUE();
@@ -1284,7 +1293,7 @@ OPCODE(CALL_FUNCTION_VAR) {
         n++;
     if (flags & CALL_FLAG_KW)
         n++;
-    pfunc = stack_pointer - n - 1;
+    pfunc = (*stack_pointer) - n - 1;
     func = *pfunc;
 
     if (PyMethod_Check(func)
@@ -1299,14 +1308,14 @@ OPCODE(CALL_FUNCTION_VAR) {
         n++;
     } else
         Py_INCREF(func);
-    sp = stack_pointer;
+    sp = (*stack_pointer);
     READ_TIMESTAMP(intr0);
     x = ext_do_call(func, &sp, flags, na, nk);
     READ_TIMESTAMP(intr1);
-    stack_pointer = sp;
+    (*stack_pointer) = sp;
     Py_DECREF(func);
 
-    while (stack_pointer > pfunc) {
+    while ((*stack_pointer) > pfunc) {
         w = POP();
         Py_DECREF(w);
     }
@@ -1318,7 +1327,7 @@ OPCODE(CALL_FUNCTION_VAR) {
 
 OPCODE(YIELD_VALUE) {
     *retval = POP();
-    // f->f_stacktop = stack_pointer;
+    f->f_stacktop = (*stack_pointer); 
     *why = WHY_YIELD;
     BREAK();
 } END_OPCODE                    
@@ -2374,8 +2383,8 @@ OPCODE(UNPACK_SEQUENCE) {
             PUSH(w);
         }
     } else if (unpack_iterable(v, oparg,
-                               stack_pointer + oparg)) {
-        stack_pointer += oparg;
+                               (*stack_pointer) + oparg)) {
+        (*stack_pointer) += oparg;
         CONTINUE();
     } else {
         /* unpack_iterable() raised an exception */
