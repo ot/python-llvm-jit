@@ -270,8 +270,8 @@ code_dealloc(PyCodeObject *co)
 	Py_XDECREF(co->co_lnotab);
         if (co->co_zombieframe != NULL)
                 PyObject_GC_Del(co->co_zombieframe);
-	PyObject_DEL(co);
 	finalize_jitted_function(co);
+	PyObject_DEL(co);
 }
 
 static PyObject *

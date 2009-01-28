@@ -125,13 +125,13 @@ public:
         FPM->add(createDeadCodeEliminationPass());
         // XXX opt 
         // TailDuplication
-        FPM->add(createTailDuplicationPass());
-        // BlockPlacement
-        FPM->add(createBlockPlacementPass());
-        // Reassociate expressions.
-        FPM->add(createReassociatePass());
-        // Simplify the control flow graph (deleting unreachable blocks, etc).
-        FPM->add(createCFGSimplificationPass());
+//         FPM->add(createTailDuplicationPass());
+//         // BlockPlacement
+//         FPM->add(createBlockPlacementPass());
+//         // Reassociate expressions.
+//         FPM->add(createReassociatePass());
+//         // Simplify the control flow graph (deleting unreachable blocks, etc).
+//         FPM->add(createCFGSimplificationPass());
 
         register_opcodes();
     }
@@ -533,13 +533,15 @@ void finalize_jit_runtime()
 struct PyJittedFunc {
     PyJittedFunc(PyCodeObject* co) {
         //printf("Compiling %s in %s:%d\n", PyString_AS_STRING(co->co_name), PyString_AS_STRING(co->co_filename), co->co_firstlineno);
-        func = jit->compile(co, 1);
+        func = jit->compile(co, 0);
         //func->dump();
         cfunc = jit->get_func_pointer(func);
     }
     
     ~PyJittedFunc() {
-        func->eraseFromParent(); // XXX is this enough?? what about machine code?
+        //printf("Deleting function %s\n", func->getName().c_str());
+        // commenting out for now, it makes strange things happen
+        //func->eraseFromParent(); // XXX is this enough?? what about machine code?
     }
     
     llvm::Function* func;
@@ -556,7 +558,7 @@ jitted_cfunc_t get_jitted_function(PyCodeObject* co)
 }
 
 extern "C"
-    void finalize_jitted_function(PyCodeObject* co) 
+void finalize_jitted_function(PyCodeObject* co) 
 {
     delete (PyJittedFunc*)co->co_jitted;
 }
