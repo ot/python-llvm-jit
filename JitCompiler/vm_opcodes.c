@@ -693,9 +693,9 @@ int unwind_stack(PyFrameObject* f, PyObject*** stack_pointer, PyThreadState* tst
         // XXX this is not under fast_block_end
         PyTraceBack_Here(f);
         
-        if (tstate->c_tracefunc != NULL)
-            call_exc_trace(tstate->c_tracefunc,
-                           tstate->c_traceobj, f);
+//         if (tstate->c_tracefunc != NULL)
+//             call_exc_trace(tstate->c_tracefunc,
+//                            tstate->c_traceobj, f);
     }
 
     if (*why == WHY_RERAISE)

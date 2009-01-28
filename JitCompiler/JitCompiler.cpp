@@ -72,6 +72,7 @@ public:
         
         // XXX Passes stolen from N3 VMKit -- recheck
 
+        /*
         FPM->add(createCFGSimplificationPass());    // Clean up disgusting code
         FPM->add(createScalarReplAggregatesPass());// Kill useless allocas
         FPM->add(createInstructionCombiningPass()); // Clean up after IPCP & DAE
@@ -103,8 +104,8 @@ public:
         //FPM->add(createGCSEPass());                 // Remove common subexprs
         FPM->add(createSCCPPass());                 // Constant prop with SCCP
         FPM->add(createPredicateSimplifierPass());                
-  
-  
+        
+        
         // Run instcombine after redundancy elimination to exploit opportunities
         // opened up by them.
         FPM->add(createInstructionCombiningPass());
@@ -114,23 +115,23 @@ public:
         FPM->add(createAggressiveDCEPass());        // SSA based 'Aggressive DCE'
         FPM->add(createCFGSimplificationPass());    // Merge & remove BBs
         //addPass(PM, mvm::createLowerArrayLengthPass());
-
+        */
 
         // mem2reg
-//         FPM->add(createPromoteMemoryToRegisterPass());
-//         // Do simple "peephole" optimizations and bit-twiddling optzns.
-//         FPM->add(createInstructionCombiningPass());
-//         // Dead code Elimination
-//         FPM->add(createDeadCodeEliminationPass());
-//         // XXX opt 
-//         // TailDuplication
-//         FPM->add(createTailDuplicationPass());
-//         // BlockPlacement
-//         FPM->add(createBlockPlacementPass());
-//         // Reassociate expressions.
-//         FPM->add(createReassociatePass());
-//         // Simplify the control flow graph (deleting unreachable blocks, etc).
-//         FPM->add(createCFGSimplificationPass());
+        FPM->add(createPromoteMemoryToRegisterPass());
+        // Do simple "peephole" optimizations and bit-twiddling optzns.
+        FPM->add(createInstructionCombiningPass());
+        // Dead code Elimination
+        FPM->add(createDeadCodeEliminationPass());
+        // XXX opt 
+        // TailDuplication
+        FPM->add(createTailDuplicationPass());
+        // BlockPlacement
+        FPM->add(createBlockPlacementPass());
+        // Reassociate expressions.
+        FPM->add(createReassociatePass());
+        // Simplify the control flow graph (deleting unreachable blocks, etc).
+        FPM->add(createCFGSimplificationPass());
 
         register_opcodes();
     }
@@ -531,14 +532,14 @@ void finalize_jit_runtime()
 
 struct PyJittedFunc {
     PyJittedFunc(PyCodeObject* co) {
-        printf("Compiling %s in %s:%d\n", PyString_AS_STRING(co->co_name), PyString_AS_STRING(co->co_filename), co->co_firstlineno);
-        func = jit->compile(co, 0);
+        //printf("Compiling %s in %s:%d\n", PyString_AS_STRING(co->co_name), PyString_AS_STRING(co->co_filename), co->co_firstlineno);
+        func = jit->compile(co, 1);
         //func->dump();
         cfunc = jit->get_func_pointer(func);
     }
     
     ~PyJittedFunc() {
-        // XXX
+        func->eraseFromParent(); // XXX is this enough?? what about machine code?
     }
     
     llvm::Function* func;

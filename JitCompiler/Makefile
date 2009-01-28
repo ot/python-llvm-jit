@@ -12,7 +12,7 @@ export MACOSX_DEPLOYMENT_TARGET
 all: JitCompiler vm_runtime.bc
 
 vm_runtime.bc: vm_opcodes.c
-	llvm-gcc --emit-llvm  -I ../Include -I ../ -fno-strict-aliasing -no-cpp-precomp -mno-fused-madd -fwrapv -Wall -DNDEBUG -O3 -g0 \
+	llvm-gcc --emit-llvm  -I ../Include -I ../ -fno-strict-aliasing -no-cpp-precomp -mno-fused-madd -fwrapv -Wall -DNDEBUG -Os -g0 \
 		vm_opcodes.c -c -o vm_runtime.bc
 
 JitCompiler: JitCompiler.cpp
