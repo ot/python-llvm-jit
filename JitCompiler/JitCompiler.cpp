@@ -531,7 +531,7 @@ void finalize_jit_runtime()
 
 struct PyJittedFunc {
     PyJittedFunc(PyCodeObject* co) {
-        printf("Compiling %s in %s\n", PyString_AS_STRING(co->co_name), PyString_AS_STRING(co->co_filename));
+        printf("Compiling %s in %s:%d\n", PyString_AS_STRING(co->co_name), PyString_AS_STRING(co->co_filename), co->co_firstlineno);
         func = jit->compile(co, 0);
         //func->dump();
         cfunc = jit->get_func_pointer(func);
