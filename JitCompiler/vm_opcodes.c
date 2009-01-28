@@ -98,6 +98,10 @@ void set_stack_pointer(PyFrameObject* f, PyObject** sp) {
     f->f_stacktop = sp;
 }
 
+int get_lasti (PyFrameObject* f) {
+    return f->f_lasti;
+}
+
 void set_lasti(PyFrameObject* f, int lasti) {
     f->f_lasti = lasti;
 }

@@ -214,10 +214,16 @@ public:
         BasicBlock* fill_lasti_block = BasicBlock::Create("fill_lasti", func);
         BasicBlock* block_end_block = BasicBlock::Create("block_end", func);
 
-        // if throwflag goto block_end else opcode0
+        // if throwflag goto block_end else dispatch to opblocks[f_lasti+1]
         builder.SetInsertPoint(entry);
+        CallInst* gli = builder.CreateCall(the_module->getFunction("get_lasti"),
+                                           func_f);
+        Value* lastipp = builder.CreateAdd(gli, ConstantInt::get(APInt(32, 1)));
+        builder.CreateStore(lastipp, dispatch_var);
         Value* bthrowflag = builder.CreateICmpEQ(func_throwflag, ConstantInt::get(APInt(32, 1))); 
-        builder.CreateCondBr(bthrowflag, gen_throw_block, opblocks[0]);
+        builder.CreateCondBr(bthrowflag, gen_throw_block, dispatch_block);
+
+
         builder.SetInsertPoint(gen_throw_block);
         builder.CreateStore(ConstantInt::get(APInt(32, WHY_EXCEPTION)), why_var);
         builder.CreateBr(block_end_block);
@@ -275,7 +281,8 @@ public:
                 int true_line = line + 3;
                 int false_line = line + 3 + oparg;
                 if (opcode == JUMP_IF_TRUE) std::swap(true_line, false_line);
-                Value* cond = builder.CreateCall2(is_top_true, func_f, sp_var);
+                CallInst* cond = builder.CreateCall2(is_top_true, func_f, sp_var);
+                to_inline.push_back(cond);
                 Value* bcond = builder.CreateICmpEQ(cond, ConstantInt::get(APInt(32, 1)));
                 builder.CreateCondBr(bcond, opblocks[true_line], opblocks[false_line]);
                 break;
@@ -525,7 +532,7 @@ void finalize_jit_runtime()
 struct PyJittedFunc {
     PyJittedFunc(PyCodeObject* co) {
         printf("Compiling %s in %s\n", PyString_AS_STRING(co->co_name), PyString_AS_STRING(co->co_filename));
-        func = jit->compile(co, 1);
+        func = jit->compile(co, 0);
         //func->dump();
         cfunc = jit->get_func_pointer(func);
     }
