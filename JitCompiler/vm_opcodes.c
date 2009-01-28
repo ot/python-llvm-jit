@@ -23,8 +23,8 @@
         PyObject* names = co->co_names;                                 \
         PyObject* consts = co->co_consts;                               \
         int ret = 1;                                                    \
-        /**/
-        //        printf("Executing opcode %d with oparg %d\n", opcode, oparg); 
+        //printf("Executing opcode %d with oparg %d\n", opcode, oparg); 
+/**/
 
 #define END_OPCODE                                                      \
     end:                                                                \
@@ -2388,6 +2388,7 @@ OPCODE(UNPACK_SEQUENCE) {
             Py_INCREF(w);
             PUSH(w);
         }
+        CONTINUE();
     } else if (unpack_iterable(v, oparg,
                                (*stack_pointer) + oparg)) {
         (*stack_pointer) += oparg;
