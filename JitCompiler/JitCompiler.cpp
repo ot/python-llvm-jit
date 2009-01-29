@@ -117,12 +117,14 @@ public:
         //addPass(PM, mvm::createLowerArrayLengthPass());
         */
 
+        FPM->add(createScalarReplAggregatesPass());
         // mem2reg
         FPM->add(createPromoteMemoryToRegisterPass());
         // Do simple "peephole" optimizations and bit-twiddling optzns.
         FPM->add(createInstructionCombiningPass());
         // Dead code Elimination
         FPM->add(createDeadCodeEliminationPass());
+        FPM->add(createCFGSimplificationPass());
         // XXX opt 
         // TailDuplication
 //         FPM->add(createTailDuplicationPass());
@@ -219,6 +221,7 @@ public:
         builder.SetInsertPoint(entry);
         CallInst* gli = builder.CreateCall(the_module->getFunction("get_lasti"),
                                            func_f);
+        to_inline.push_back(gli);
         Value* lastipp = builder.CreateAdd(gli, ConstantInt::get(APInt(32, 1)));
         builder.CreateStore(lastipp, dispatch_var);
         Value* bthrowflag = builder.CreateICmpEQ(func_throwflag, ConstantInt::get(APInt(32, 1))); 
@@ -259,7 +262,7 @@ public:
             else ophandler = opcode_unimplemented;                      \
             assert(ophandler);                                          \
             opret = builder.CreateCall(ophandler, opcode_args.begin(), opcode_args.end()); \
-            to_inline.push_back(opret);                                 \
+            if (inline_opcode[opcode]) to_inline.push_back(opret);       \
             /**/
       
             switch(opcode) {
@@ -291,6 +294,7 @@ public:
 
             case FOR_ITER: {
                 opret = builder.CreateCall(opcode_funcs[opcode], opcode_args.begin(), opcode_args.end());
+                to_inline.push_back(opret);
                 SwitchInst* sw = builder.CreateSwitch(opret, fill_lasti_block);
                 sw->addCase(ConstantInt::get(APInt(32, 0)), block_end_block); // error
                 sw->addCase(ConstantInt::get(APInt(32, 1)), opblocks[line + 3]); // continue loop
@@ -351,144 +355,145 @@ public:
 protected:
     void register_opcodes() {
         using namespace llvm;
-
-#       define REGISTER_OPCODE(OPCODENAME)                              \
+        inline_opcode.resize(256);
+#       define REGISTER_OPCODE(OPCODENAME, INLINE)                      \
         {                                                               \
             Function* ophandler = the_module->getFunction("opcode_" #OPCODENAME); \
             opcode_funcs[OPCODENAME] = ophandler;                       \
+            inline_opcode[OPCODENAME] = INLINE;                          \
         }                                                               \
         /**/
-
-#       define REGISTER_ALIAS(ALIAS, OPCODENAME)       \
+        
+#       define REGISTER_ALIAS(ALIAS, OPCODENAME)                 \
         opcode_funcs[ALIAS] = opcode_funcs[OPCODENAME];          \
+        inline_opcode[ALIAS] = inline_opcode[OPCODENAME];        \
         /**/
             
-        REGISTER_OPCODE(NOP);
-        REGISTER_OPCODE(ROT_TWO);
-        REGISTER_OPCODE(ROT_THREE);
-        REGISTER_OPCODE(ROT_FOUR);
+        REGISTER_OPCODE(NOP, true);
+        REGISTER_OPCODE(ROT_TWO, true);
+        REGISTER_OPCODE(ROT_THREE, true);
+        REGISTER_OPCODE(ROT_FOUR, true);
 
-        REGISTER_OPCODE(STORE_NAME);
-        REGISTER_OPCODE(RETURN_VALUE);
-        REGISTER_OPCODE(YIELD_VALUE);
-        REGISTER_OPCODE(LOAD_CONST);
-        REGISTER_OPCODE(PRINT_ITEM);
-        REGISTER_OPCODE(PRINT_NEWLINE);
-        REGISTER_OPCODE(PRINT_EXPR);
-        REGISTER_OPCODE(LOAD_NAME);
-        REGISTER_OPCODE(DELETE_NAME);
-        REGISTER_OPCODE(COMPARE_OP);
+        REGISTER_OPCODE(STORE_NAME, false);
+        REGISTER_OPCODE(RETURN_VALUE, true);
+        REGISTER_OPCODE(YIELD_VALUE, true);
+        REGISTER_OPCODE(LOAD_CONST, true);
+        REGISTER_OPCODE(PRINT_ITEM, false);
+        REGISTER_OPCODE(PRINT_NEWLINE, false);
+        REGISTER_OPCODE(PRINT_EXPR, false);
+        REGISTER_OPCODE(LOAD_NAME, false);
+        REGISTER_OPCODE(DELETE_NAME, false);
+        REGISTER_OPCODE(COMPARE_OP, false);
 
-        REGISTER_OPCODE(LOAD_FAST);
-        REGISTER_OPCODE(STORE_FAST);
-        REGISTER_OPCODE(DELETE_FAST);
-        REGISTER_OPCODE(LOAD_LOCALS);
+        REGISTER_OPCODE(LOAD_FAST, true);
+        REGISTER_OPCODE(STORE_FAST, true);
+        REGISTER_OPCODE(DELETE_FAST, true);
+        REGISTER_OPCODE(LOAD_LOCALS, true);
 
-        REGISTER_OPCODE(POP_TOP);
-        REGISTER_OPCODE(DUP_TOP);
+        REGISTER_OPCODE(POP_TOP, true);
+        REGISTER_OPCODE(DUP_TOP, true);
 
-        REGISTER_OPCODE(SETUP_LOOP);
+        REGISTER_OPCODE(SETUP_LOOP, true);
         REGISTER_ALIAS(SETUP_EXCEPT, SETUP_LOOP);
         REGISTER_ALIAS(SETUP_FINALLY, SETUP_LOOP);
-        REGISTER_OPCODE(RAISE_VARARGS);
+        REGISTER_OPCODE(RAISE_VARARGS, true);
 
-        REGISTER_OPCODE(BUILD_LIST);
-        REGISTER_OPCODE(BUILD_TUPLE);
-        REGISTER_OPCODE(BUILD_MAP);
-        REGISTER_OPCODE(LIST_APPEND);
+        REGISTER_OPCODE(BUILD_LIST, true);
+        REGISTER_OPCODE(BUILD_TUPLE, true);
+        REGISTER_OPCODE(BUILD_MAP, true);
+        REGISTER_OPCODE(LIST_APPEND, true);
 
-        REGISTER_OPCODE(GET_ITER);
-        REGISTER_OPCODE(FOR_ITER);
-        REGISTER_OPCODE(UNPACK_SEQUENCE);
-        REGISTER_OPCODE(BREAK_LOOP);
+        REGISTER_OPCODE(GET_ITER, true);
+        REGISTER_OPCODE(FOR_ITER, true); // XXX?
+        REGISTER_OPCODE(UNPACK_SEQUENCE, false);
+        REGISTER_OPCODE(BREAK_LOOP, true);
 
-        REGISTER_OPCODE(POP_BLOCK);
-        REGISTER_OPCODE(END_FINALLY);
+        REGISTER_OPCODE(POP_BLOCK, true);
+        REGISTER_OPCODE(END_FINALLY, false);
 
-        REGISTER_OPCODE(MAKE_FUNCTION);
-        REGISTER_OPCODE(MAKE_CLOSURE);
-        REGISTER_OPCODE(LOAD_CLOSURE);
-        REGISTER_OPCODE(CALL_FUNCTION);
-        REGISTER_OPCODE(CALL_FUNCTION_VAR);
+        REGISTER_OPCODE(MAKE_FUNCTION, false);
+        REGISTER_OPCODE(MAKE_CLOSURE, false);
+        REGISTER_OPCODE(LOAD_CLOSURE, false);
+        REGISTER_OPCODE(CALL_FUNCTION, false);
+        REGISTER_OPCODE(CALL_FUNCTION_VAR, false);
         REGISTER_ALIAS(CALL_FUNCTION_KW, CALL_FUNCTION_VAR);
         REGISTER_ALIAS(CALL_FUNCTION_VAR_KW, CALL_FUNCTION_VAR);
 
-        REGISTER_OPCODE(LOAD_ATTR);
-        REGISTER_OPCODE(STORE_ATTR);
-        REGISTER_OPCODE(DELETE_ATTR);
+        REGISTER_OPCODE(LOAD_ATTR, true);
+        REGISTER_OPCODE(STORE_ATTR, true);
+        REGISTER_OPCODE(DELETE_ATTR, true);
 
-        REGISTER_OPCODE(IMPORT_FROM);
-        REGISTER_OPCODE(IMPORT_STAR);
-        REGISTER_OPCODE(IMPORT_NAME);
+        REGISTER_OPCODE(IMPORT_FROM, true);
+        REGISTER_OPCODE(IMPORT_STAR, true);
+        REGISTER_OPCODE(IMPORT_NAME, false);
         
-        REGISTER_OPCODE(BUILD_CLASS);
-        REGISTER_OPCODE(EXEC_STMT);
+        REGISTER_OPCODE(BUILD_CLASS, true);
+        REGISTER_OPCODE(EXEC_STMT, true);
         
-        REGISTER_OPCODE(LOAD_GLOBAL);
-        REGISTER_OPCODE(STORE_GLOBAL);
+        REGISTER_OPCODE(LOAD_GLOBAL, false);
+        REGISTER_OPCODE(STORE_GLOBAL, true);
 
-        REGISTER_OPCODE(BINARY_SUBSCR);
-        REGISTER_OPCODE(STORE_SUBSCR);
-        REGISTER_OPCODE(DELETE_SUBSCR);
+        REGISTER_OPCODE(BINARY_SUBSCR, true);
+        REGISTER_OPCODE(STORE_SUBSCR, true);
+        REGISTER_OPCODE(DELETE_SUBSCR, true);
             
-        REGISTER_OPCODE(UNARY_POSITIVE);
-        REGISTER_OPCODE(UNARY_NEGATIVE);
-        REGISTER_OPCODE(UNARY_NOT);
-        REGISTER_OPCODE(UNARY_CONVERT);
-        REGISTER_OPCODE(UNARY_INVERT);
-        REGISTER_OPCODE(BINARY_POWER);
-        REGISTER_OPCODE(BINARY_MULTIPLY);
-        REGISTER_OPCODE(BINARY_DIVIDE);
+        REGISTER_OPCODE(UNARY_POSITIVE, true);
+        REGISTER_OPCODE(UNARY_NEGATIVE, true);
+        REGISTER_OPCODE(UNARY_NOT, true);
+        REGISTER_OPCODE(UNARY_CONVERT, true);
+        REGISTER_OPCODE(UNARY_INVERT, true);
+        REGISTER_OPCODE(BINARY_POWER, true);
+        REGISTER_OPCODE(BINARY_MULTIPLY, true);
+        REGISTER_OPCODE(BINARY_DIVIDE, true);
         REGISTER_ALIAS(BINARY_TRUE_DIVIDE, BINARY_DIVIDE);
-        REGISTER_OPCODE(BINARY_FLOOR_DIVIDE);
-        REGISTER_OPCODE(BINARY_MODULO);
-        REGISTER_OPCODE(BINARY_ADD);
-        REGISTER_OPCODE(BINARY_SUBTRACT);
+        REGISTER_OPCODE(BINARY_FLOOR_DIVIDE, true);
+        REGISTER_OPCODE(BINARY_MODULO, true);
+        REGISTER_OPCODE(BINARY_ADD, true);
+        REGISTER_OPCODE(BINARY_SUBTRACT, true);
         
-        REGISTER_OPCODE(SLICE);
+        REGISTER_OPCODE(SLICE, true);
         REGISTER_ALIAS(SLICE+0, SLICE);
         REGISTER_ALIAS(SLICE+1, SLICE);
         REGISTER_ALIAS(SLICE+2, SLICE);
         REGISTER_ALIAS(SLICE+3, SLICE);
 
-        REGISTER_OPCODE(STORE_SLICE);
+        REGISTER_OPCODE(STORE_SLICE, true);
         REGISTER_ALIAS(STORE_SLICE+0, STORE_SLICE);
         REGISTER_ALIAS(STORE_SLICE+1, STORE_SLICE);
         REGISTER_ALIAS(STORE_SLICE+2, STORE_SLICE);
         REGISTER_ALIAS(STORE_SLICE+3, STORE_SLICE);
 
-        REGISTER_OPCODE(DELETE_SLICE);
+        REGISTER_OPCODE(DELETE_SLICE, true);
         REGISTER_ALIAS(DELETE_SLICE+0, DELETE_SLICE);
         REGISTER_ALIAS(DELETE_SLICE+1, DELETE_SLICE);
         REGISTER_ALIAS(DELETE_SLICE+2, DELETE_SLICE);
         REGISTER_ALIAS(DELETE_SLICE+3, DELETE_SLICE);
 
-        REGISTER_OPCODE(BINARY_LSHIFT);
-        REGISTER_OPCODE(BINARY_RSHIFT);
-        REGISTER_OPCODE(BINARY_AND);
-        REGISTER_OPCODE(BINARY_XOR);
-        REGISTER_OPCODE(BINARY_OR);
+        REGISTER_OPCODE(BINARY_LSHIFT, true);
+        REGISTER_OPCODE(BINARY_RSHIFT, true);
+        REGISTER_OPCODE(BINARY_AND, true);
+        REGISTER_OPCODE(BINARY_XOR, true);
+        REGISTER_OPCODE(BINARY_OR, true);
 
-        REGISTER_OPCODE(INPLACE_POWER);
-        REGISTER_OPCODE(INPLACE_MULTIPLY);
-        REGISTER_OPCODE(INPLACE_DIVIDE);
+        REGISTER_OPCODE(INPLACE_POWER, true);
+        REGISTER_OPCODE(INPLACE_MULTIPLY, true);
+        REGISTER_OPCODE(INPLACE_DIVIDE, true);
         REGISTER_ALIAS(INPLACE_TRUE_DIVIDE, INPLACE_DIVIDE);
-        REGISTER_OPCODE(INPLACE_FLOOR_DIVIDE);
-        REGISTER_OPCODE(INPLACE_MODULO);
-        REGISTER_OPCODE(INPLACE_ADD);
-        REGISTER_OPCODE(INPLACE_SUBTRACT);
-        REGISTER_OPCODE(INPLACE_LSHIFT);
-        REGISTER_OPCODE(INPLACE_RSHIFT);
-        REGISTER_OPCODE(INPLACE_AND);
-        REGISTER_OPCODE(INPLACE_XOR);
-        REGISTER_OPCODE(INPLACE_OR);
+        REGISTER_OPCODE(INPLACE_FLOOR_DIVIDE, true);
+        REGISTER_OPCODE(INPLACE_MODULO, true);
+        REGISTER_OPCODE(INPLACE_ADD, true);
+        REGISTER_OPCODE(INPLACE_SUBTRACT, true);
+        REGISTER_OPCODE(INPLACE_LSHIFT, true);
+        REGISTER_OPCODE(INPLACE_RSHIFT, true);
+        REGISTER_OPCODE(INPLACE_AND, true);
+        REGISTER_OPCODE(INPLACE_XOR, true);
+        REGISTER_OPCODE(INPLACE_OR, true);
 
-        REGISTER_OPCODE(LOAD_DEREF);
-        REGISTER_OPCODE(STORE_DEREF);
+        REGISTER_OPCODE(LOAD_DEREF, true);
+        REGISTER_OPCODE(STORE_DEREF, true);
 
 #       undef REGISTER_OPCODE
 #       undef REGISTER_ALIAS
-        
     }
       
     llvm::ModuleProvider* MP;
@@ -497,6 +502,7 @@ protected:
     llvm::FunctionPassManager* FPM;
 
     std::map<int, llvm::Function*> opcode_funcs;
+    std::vector<int> inline_opcode;
     llvm::Function* opcode_unimplemented;
     llvm::Function* is_top_true;
     llvm::Function* unwind_stack;
@@ -533,7 +539,7 @@ void finalize_jit_runtime()
 struct PyJittedFunc {
     PyJittedFunc(PyCodeObject* co) {
         //printf("Compiling %s in %s:%d\n", PyString_AS_STRING(co->co_name), PyString_AS_STRING(co->co_filename), co->co_firstlineno);
-        func = jit->compile(co, 0);
+        func = jit->compile(co, 1);
         //func->dump();
         cfunc = jit->get_func_pointer(func);
     }
@@ -561,6 +567,7 @@ extern "C"
 void finalize_jitted_function(PyCodeObject* co) 
 {
     delete (PyJittedFunc*)co->co_jitted;
+    co->co_jitted = 0;
 }
 
 #ifdef JIT_TEST
