@@ -37,7 +37,7 @@ static intptr_t py_id(PyObject* o) {
 
 class JITRuntime {
 public:
-    JITRuntime() {
+    JITRuntime(int optimize = 1) {
         using namespace llvm;
         MemoryBuffer* buffer = MemoryBuffer::getFile("vm_runtime.bc");
         assert(buffer);				
@@ -70,70 +70,71 @@ public:
         FPM = new FunctionPassManager(MP);
         FPM->add(new TargetData(*EE->getTargetData()));
         
-        // XXX Passes stolen from N3 VMKit -- recheck
+        if (optimize == 1 || optimize == 2) {
+            // mem2reg
+            FPM->add(createPromoteMemoryToRegisterPass());
+            // Do simple "peephole" optimizations and bit-twiddling optzns.
+            FPM->add(createInstructionCombiningPass());
+            // Dead code Elimination
+            FPM->add(createDeadCodeEliminationPass());
+            FPM->add(createCFGSimplificationPass());
+        }
+        if (optimize == 2) {
+            // TailDuplication
+            FPM->add(createTailDuplicationPass());
+            // BlockPlacement
+            FPM->add(createBlockPlacementPass());
+            // Reassociate expressions.
+            FPM->add(createReassociatePass());
+            // Simplify the control flow graph (deleting unreachable blocks, etc).
+            FPM->add(createCFGSimplificationPass());
+        }
 
-        /*
-        FPM->add(createCFGSimplificationPass());    // Clean up disgusting code
-        FPM->add(createScalarReplAggregatesPass());// Kill useless allocas
-        FPM->add(createInstructionCombiningPass()); // Clean up after IPCP & DAE
-        FPM->add(createCFGSimplificationPass());    // Clean up after IPCP & DAE
-        FPM->add(createPromoteMemoryToRegisterPass());// Kill useless allocas
-        FPM->add(createInstructionCombiningPass()); // Clean up after IPCP & DAE
-        FPM->add(createCFGSimplificationPass());    // Clean up after IPCP & DAE
+        if (optimize == 3) {
+            // XXX Passes stolen from N3 VMKit -- recheck
+            FPM->add(createCFGSimplificationPass());    // Clean up disgusting code
+            FPM->add(createScalarReplAggregatesPass());// Kill useless allocas
+            FPM->add(createInstructionCombiningPass()); // Clean up after IPCP & DAE
+            FPM->add(createCFGSimplificationPass());    // Clean up after IPCP & DAE
+            FPM->add(createPromoteMemoryToRegisterPass());// Kill useless allocas
+            FPM->add(createInstructionCombiningPass()); // Clean up after IPCP & DAE
+            FPM->add(createCFGSimplificationPass());    // Clean up after IPCP & DAE
   
-        FPM->add(createTailDuplicationPass());      // Simplify cfg by copying code
-        FPM->add(createInstructionCombiningPass()); // Cleanup for scalarrepl.
-        FPM->add(createCFGSimplificationPass());    // Merge & remove BBs
-        FPM->add(createScalarReplAggregatesPass()); // Break up aggregate allocas
-        FPM->add(createInstructionCombiningPass()); // Combine silly seq's
-        FPM->add(createCondPropagationPass());      // Propagate conditionals
+            FPM->add(createTailDuplicationPass());      // Simplify cfg by copying code
+            FPM->add(createInstructionCombiningPass()); // Cleanup for scalarrepl.
+            FPM->add(createCFGSimplificationPass());    // Merge & remove BBs
+            FPM->add(createScalarReplAggregatesPass()); // Break up aggregate allocas
+            FPM->add(createInstructionCombiningPass()); // Combine silly seq's
+            FPM->add(createCondPropagationPass());      // Propagate conditionals
   
    
-        FPM->add(createTailCallEliminationPass());  // Eliminate tail calls
-        FPM->add(createCFGSimplificationPass());    // Merge & remove BBs
-        FPM->add(createReassociatePass());          // Reassociate expressions
-        FPM->add(createLoopRotatePass());
-        FPM->add(createLICMPass());                 // Hoist loop invariants
-        FPM->add(createLoopUnswitchPass());         // Unswitch loops.
-        FPM->add(createInstructionCombiningPass()); // Clean up after LICM/reassoc
-        FPM->add(createIndVarSimplifyPass());       // Canonicalize indvars
-        FPM->add(createLoopUnrollPass());           // Unroll small loops
-        FPM->add(createInstructionCombiningPass()); // Clean up after the unroller
-        //addPass(PM, mvm::createArrayChecksPass()); 
-        FPM->add(createGVNPass());                  // GVN for load instructions
-        //FPM->add(createGCSEPass());                 // Remove common subexprs
-        FPM->add(createSCCPPass());                 // Constant prop with SCCP
-        FPM->add(createPredicateSimplifierPass());                
+            FPM->add(createTailCallEliminationPass());  // Eliminate tail calls
+            FPM->add(createCFGSimplificationPass());    // Merge & remove BBs
+            FPM->add(createReassociatePass());          // Reassociate expressions
+            FPM->add(createLoopRotatePass());
+            FPM->add(createLICMPass());                 // Hoist loop invariants
+            FPM->add(createLoopUnswitchPass());         // Unswitch loops.
+            FPM->add(createInstructionCombiningPass()); // Clean up after LICM/reassoc
+            FPM->add(createIndVarSimplifyPass());       // Canonicalize indvars
+            FPM->add(createLoopUnrollPass());           // Unroll small loops
+            FPM->add(createInstructionCombiningPass()); // Clean up after the unroller
+            //addPass(PM, mvm::createArrayChecksPass()); 
+            FPM->add(createGVNPass());                  // GVN for load instructions
+            //FPM->add(createGCSEPass());                 // Remove common subexprs
+            FPM->add(createSCCPPass());                 // Constant prop with SCCP
+            FPM->add(createPredicateSimplifierPass());                
         
         
-        // Run instcombine after redundancy elimination to exploit opportunities
-        // opened up by them.
-        FPM->add(createInstructionCombiningPass());
-        FPM->add(createCondPropagationPass());      // Propagate conditionals
+            // Run instcombine after redundancy elimination to exploit opportunities
+            // opened up by them.
+            FPM->add(createInstructionCombiningPass());
+            FPM->add(createCondPropagationPass());      // Propagate conditionals
 
-        FPM->add(createDeadStoreEliminationPass()); // Delete dead stores
-        FPM->add(createAggressiveDCEPass());        // SSA based 'Aggressive DCE'
-        FPM->add(createCFGSimplificationPass());    // Merge & remove BBs
-        //addPass(PM, mvm::createLowerArrayLengthPass());
-        */
-
-        FPM->add(createScalarReplAggregatesPass());
-        // mem2reg
-        FPM->add(createPromoteMemoryToRegisterPass());
-        // Do simple "peephole" optimizations and bit-twiddling optzns.
-        FPM->add(createInstructionCombiningPass());
-        // Dead code Elimination
-        FPM->add(createDeadCodeEliminationPass());
-        FPM->add(createCFGSimplificationPass());
-        // XXX opt 
-        // TailDuplication
-//         FPM->add(createTailDuplicationPass());
-//         // BlockPlacement
-//         FPM->add(createBlockPlacementPass());
-//         // Reassociate expressions.
-//         FPM->add(createReassociatePass());
-//         // Simplify the control flow graph (deleting unreachable blocks, etc).
-//         FPM->add(createCFGSimplificationPass());
+            FPM->add(createDeadStoreEliminationPass()); // Delete dead stores
+            FPM->add(createAggressiveDCEPass());        // SSA based 'Aggressive DCE'
+            FPM->add(createCFGSimplificationPass());    // Merge & remove BBs
+            //addPass(PM, mvm::createLowerArrayLengthPass());
+        }
 
         register_opcodes();
     }
@@ -143,7 +144,7 @@ public:
         delete FPM;
     }
   
-    llvm::Function* compile(PyCodeObject* co, int optimize = 1) {
+    llvm::Function* compile(PyCodeObject* co, int inlineopcodes = 1) {
         using namespace llvm;
     
         std::string fname = make_function_name(co);
@@ -339,11 +340,11 @@ public:
         Value* b_do_jump = builder.CreateICmpEQ(do_jump, ConstantInt::get(APInt(32, 1)));
         builder.CreateCondBr(b_do_jump, dispatch_block, end_block);
 
-        if (optimize) { 
+        if (inlineopcodes) {
             for (size_t i = 0; i < to_inline.size(); ++i) 
                 InlineFunction(to_inline[i]);
-            FPM->run(*func);
         }
+        FPM->run(*func);
         return func;
     }
 
@@ -526,7 +527,7 @@ JITRuntime* jit = 0;
 extern "C"
 void init_jit_runtime() 
 {
-    jit = new JITRuntime();
+    jit = new JITRuntime(3);
 }
 
 extern "C"
@@ -539,7 +540,7 @@ void finalize_jit_runtime()
 struct PyJittedFunc {
     PyJittedFunc(PyCodeObject* co) {
         //printf("Compiling %s in %s:%d\n", PyString_AS_STRING(co->co_name), PyString_AS_STRING(co->co_filename), co->co_firstlineno);
-        func = jit->compile(co, 1);
+        func = jit->compile(co);
         //func->dump();
         cfunc = jit->get_func_pointer(func);
     }
@@ -572,8 +573,7 @@ void finalize_jitted_function(PyCodeObject* co)
 
 #ifdef JIT_TEST
 
-int main() {
-    JITRuntime jit;
+int main(int argc, char** argv) {
     Py_InitializeEx(0);
 
     // C or C++ do not have a function "read a file into a string"????
@@ -581,6 +581,13 @@ int main() {
     char code[MAXCODE];
     int bytes = fread(code, 1, MAXCODE-1, stdin);
     code[bytes] = 0;
+    int optimize = 1, inlineopcodes = 1;
+    if (argc >= 2) {
+        optimize = atoi(argv[1]);
+    } 
+    if (argc >= 3) {
+        inlineopcodes = atoi(argv[2]);
+    }
     
   
     PyCodeObject* co = (PyCodeObject*)Py_CompileString(code, "<test.py>", Py_file_input);
@@ -591,8 +598,9 @@ int main() {
     PyObject* dis = PyObject_GetAttrString(dis_module, "dis");
     PyObject_CallFunctionObjArgs(dis, co, NULL);
 
+    JITRuntime jit(optimize);
     // show LLVM bitcode
-    llvm::Function* cf = jit.compile(co, 1);
+    llvm::Function* cf = jit.compile(co, inlineopcodes);
     cf->dump();
 
     // try to execute function
