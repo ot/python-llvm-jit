@@ -34,7 +34,6 @@ static intptr_t py_id(PyObject* o) {
     return (intptr_t)o;
 }
 
-
 class JITRuntime {
 public:
     JITRuntime(int optimize = 1) {
@@ -249,6 +248,7 @@ public:
             SmallVector<Value*, 7> opcode_args;
             opcode_args.push_back(func_f);
             opcode_args.push_back(sp_var);
+            opcode_args.push_back(func_tstate);
             opcode_args.push_back(ConstantInt::get(APInt(32, line)));
             opcode_args.push_back(ConstantInt::get(APInt(32, opcode)));
             opcode_args.push_back(ConstantInt::get(APInt(32, oparg)));

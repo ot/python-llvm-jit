@@ -212,8 +212,8 @@ PyEval_GetCallStats(PyObject *self)
 #endif
 #include "pythread.h"
 
-static PyThread_type_lock interpreter_lock = 0; /* This is the GIL */
-static long main_thread = 0;
+/*static */PyThread_type_lock interpreter_lock = 0; /* This is the GIL */
+/*static */long main_thread = 0;
 
 int
 PyEval_ThreadsInitialized(void)
@@ -356,9 +356,9 @@ static struct {
 	int (*func)(void *);
 	void *arg;
 } pendingcalls[NPENDINGCALLS];
-static volatile int pendingfirst = 0;
-static volatile int pendinglast = 0;
-static volatile int things_to_do = 0;
+/*static */volatile int pendingfirst = 0;
+/*static */volatile int pendinglast = 0;
+/*static */volatile int things_to_do = 0;
 
 int
 Py_AddPendingCall(int (*func)(void *), void *arg)
@@ -577,6 +577,13 @@ PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
 
 	jit_func = get_jitted_function(co);
 	retval = jit_func(f, tstate, throwflag);
+
+	if (tstate->frame->f_exc_type != NULL)
+		reset_exc_info(tstate);
+	else {
+		assert(tstate->frame->f_exc_value == NULL);
+		assert(tstate->frame->f_exc_traceback == NULL);
+	}
 
 	Py_LeaveRecursiveCall();
 	tstate->frame = f->f_back;

@@ -6,11 +6,15 @@
 #include "opcode.h"
 #include "code.h"
 #include "frameobject.h"
+#include "pythread.h"
 
 #include <stdlib.h>
 
+extern volatile int _Py_Ticker;
+extern int _Py_CheckInterval;
+
 #define OPCODE(OPCODENAME)                                                  \
-    int opcode_##OPCODENAME (PyFrameObject* f, PyObject*** stack_pointer,int line, int opcode, int oparg, int* why, PyObject** retval) { \
+    int opcode_##OPCODENAME (PyFrameObject* f, PyObject*** stack_pointer, PyThreadState* tstate, int line, int opcode, int oparg, int* why, PyObject** retval) { \
         int err = 0;                                                    \
         PyObject* v = 0;                                                \
         PyObject* x = Py_None;                                          \
@@ -23,6 +27,11 @@
         PyObject* names = co->co_names;                                 \
         PyObject* consts = co->co_consts;                               \
         int ret = 1;                                                    \
+        if (--_Py_Ticker < 0 && opcode != SETUP_FINALLY)                \
+            if (!do_periodic_things(tstate)) {                          \
+                *why = WHY_EXCEPTION;                                   \
+                BREAK();                                                \
+            }                                                           \
         //printf("Executing opcode %d with oparg %d\n", opcode, oparg); 
 /**/
 
@@ -104,6 +113,62 @@ int get_lasti (PyFrameObject* f) {
 
 void set_lasti(PyFrameObject* f, int lasti) {
     f->f_lasti = lasti;
+}
+
+extern volatile int things_to_do;
+extern volatile int pendingfirst;
+extern volatile int pendinglast;
+
+extern PyThread_type_lock interpreter_lock; /* This is the GIL */
+extern long main_thread;
+
+int do_periodic_things(PyThreadState* tstate) {
+    _Py_Ticker = _Py_CheckInterval;
+    tstate->tick_counter++;
+#ifdef WITH_TSC
+    ticked = 1;
+#endif
+    if (things_to_do) {
+        if (Py_MakePendingCalls() < 0) {
+//             why = WHY_EXCEPTION;
+//             goto on_error;
+            return 0;
+        }
+        if (things_to_do)
+            /* MakePendingCalls() didn't succeed.
+               Force early re-execution of this
+               "periodic" code, possibly after
+               a thread switch */
+            _Py_Ticker = 0;
+    }
+#ifdef WITH_THREAD
+    if (interpreter_lock) {
+        /* Give another thread a chance */
+
+        if (PyThreadState_Swap(NULL) != tstate)
+            Py_FatalError("ceval: tstate mix-up");
+        PyThread_release_lock(interpreter_lock);
+
+        /* Other threads may run now */
+
+        PyThread_acquire_lock(interpreter_lock, 1);
+        if (PyThreadState_Swap(tstate) != NULL)
+            Py_FatalError("ceval: orphan tstate");
+
+        /* Check for thread interrupts */
+
+        if (tstate->async_exc != NULL) {
+            PyObject* x = tstate->async_exc;
+            tstate->async_exc = NULL;
+            PyErr_SetNone(x);
+            Py_DECREF(x);
+//             why = WHY_EXCEPTION;
+//             goto on_error;
+            return 0;
+        }
+    }
+#endif
+    return 1;
 }
 
 OPCODE(UNIMPLEMENTED) {
