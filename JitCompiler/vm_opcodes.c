@@ -56,10 +56,7 @@ init_interpreter_state(interpreter_state* st, PyFrameObject* f, PyThreadState* t
     RETVAL = 0;
 }
 
-
-#define OPCODE(OPCODENAME)                                             \
-    __attribute__((used)) static int                                   \
-    opcode_##OPCODENAME (interpreter_state* st, int line, int opcode, int oparg) { \
+#define OPCODE_PREAMBLE \
         int err = 0;                                                    \
         PyObject* v = 0;                                                \
         PyObject* x = Py_None;                                          \
@@ -69,13 +66,26 @@ init_interpreter_state(interpreter_state* st, PyFrameObject* f, PyThreadState* t
         PyObject* u = 0;                                                \
         PyObject* stream = 0;                                           \
         int ret = 1;                                                    \
+        //printf("Executing opcode %d with oparg %d\n", opcode, oparg); 
+
+#define OPCODE(OPCODENAME)                                             \
+    __attribute__((used)) static int                                   \
+    opcode_##OPCODENAME (interpreter_state* st, int line, int opcode, int oparg) { \
+        OPCODE_PREAMBLE                                                \
+        /**/
+
+#define FAT_OPCODE(OPCODENAME)                  \
+    int fat_opcode_##OPCODENAME;                \
+    __attribute__((used)) static int                                   \
+    opcode_##OPCODENAME (interpreter_state* st, int line, int opcode, int oparg) { \
+        OPCODE_PREAMBLE                                                 \
         if (--_Py_Ticker < 0 && opcode != SETUP_FINALLY)                \
             if (!do_periodic_things(TSTATE)) {                          \
-                WHY = WHY_EXCEPTION;                                   \
+                WHY = WHY_EXCEPTION;                                    \
                 BREAK();                                                \
             }                                                           \
-        //printf("Executing opcode %d with oparg %d\n", opcode, oparg); 
-/**/
+        /**/
+
 
 #define END_OPCODE                                                      \
     end:                                                                \
@@ -227,7 +237,7 @@ OPCODE(UNIMPLEMENTED) {
     BREAK();
 } END_OPCODE
 
-OPCODE(STORE_NAME) {
+FAT_OPCODE(STORE_NAME) {
     w = GETITEM(NAMES, oparg);
     v = POP();
     if ((x = F->f_locals) != NULL) {
@@ -243,7 +253,7 @@ OPCODE(STORE_NAME) {
                  "no locals found when storing %s",
                  PyObject_REPR(w));
     BREAK();
-} END_OPCODE // XXX handle error
+} END_OPCODE 
 
 #define NAME_ERROR_MSG \
 	"name '%.200s' is not defined"
@@ -270,7 +280,7 @@ format_exc_check_arg(PyObject *exc, char *format_str, PyObject *obj)
 	PyErr_Format(exc, format_str, obj_str);
 }
 
-OPCODE(LOAD_NAME) {
+FAT_OPCODE(LOAD_NAME) {
     w = GETITEM(NAMES, oparg);
     if ((v = F->f_locals) == NULL) {
         PyErr_Format(PyExc_SystemError,
@@ -321,7 +331,7 @@ OPCODE(RETURN_VALUE) {
     BREAK();
 } END_OPCODE
 
-OPCODE(PRINT_ITEM) {
+FAT_OPCODE(PRINT_ITEM) {
     v = POP();
     if (stream == NULL || stream == Py_None) {
         w = PySys_GetObject("stdout");
@@ -372,7 +382,7 @@ OPCODE(PRINT_ITEM) {
     BREAK();
 } END_OPCODE
 
-OPCODE(PRINT_NEWLINE) {
+FAT_OPCODE(PRINT_NEWLINE) {
     if (stream == NULL || stream == Py_None) {
         w = PySys_GetObject("stdout");
         if (w == NULL)
@@ -422,7 +432,7 @@ cmp_outcome(int op, register PyObject *v, register PyObject *w)
 	return v;
 }
 
-OPCODE(COMPARE_OP) {
+FAT_OPCODE(COMPARE_OP) {
     w = POP();
     v = TOP();
     if (PyInt_CheckExact(w) && PyInt_CheckExact(v)) {
@@ -489,13 +499,13 @@ is_top_true(interpreter_state* st) {
     return 0; // err is nonzero
 } 
 
-OPCODE(SETUP_LOOP) {
+FAT_OPCODE(SETUP_LOOP) {
     PyFrame_BlockSetup(F, opcode, INSTR_OFFSET() + oparg,
                        STACK_LEVEL());
     CONTINUE();
 } END_OPCODE
 
-OPCODE(BUILD_LIST) {
+FAT_OPCODE(BUILD_LIST) {
     x =  PyList_New(oparg);
     if (x != NULL) {
         for (; --oparg >= 0;) {
@@ -508,7 +518,7 @@ OPCODE(BUILD_LIST) {
     BREAK();
 } END_OPCODE
 
-OPCODE(GET_ITER) {
+FAT_OPCODE(GET_ITER) {
     v = TOP();
     x = PyObject_GetIter(v);
     Py_DECREF(v);
@@ -520,7 +530,7 @@ OPCODE(GET_ITER) {
     BREAK();
 } END_OPCODE
 
-OPCODE(FOR_ITER) {
+FAT_OPCODE(FOR_ITER) {
     /* before: [iter]; after: [iter, iter()] *or* [] */
     v = TOP();
     x = (*v->ob_type->tp_iternext)(v);
@@ -539,7 +549,7 @@ OPCODE(FOR_ITER) {
     RETURN(2); // Special value to signal iteration end
 } END_OPCODE
 
-OPCODE(POP_BLOCK) {
+FAT_OPCODE(POP_BLOCK) {
     PyTryBlock *b = PyFrame_BlockPop(F);
     while (STACK_LEVEL() > b->b_level) {
         v = POP();
@@ -656,7 +666,7 @@ do_raise(PyObject *type, PyObject *value, PyObject *tb)
 	return WHY_EXCEPTION;
 }
 
-OPCODE(RAISE_VARARGS) {
+FAT_OPCODE(RAISE_VARARGS) {
     u = v = w = NULL;
     switch (oparg) {
     case 3:
@@ -902,7 +912,7 @@ int unwind_stack(interpreter_state* st, int* jump_to) {
     return ret;
 }
 
-OPCODE(END_FINALLY) {
+FAT_OPCODE(END_FINALLY) {
     v = POP();
     if (PyInt_Check(v)) {
         WHY = (enum why_code) PyInt_AS_LONG(v);
@@ -1311,7 +1321,7 @@ ext_do_call(PyObject *func, PyObject ***pp_stack, int flags, int na, int nk)
 }
 
 
-OPCODE(CALL_FUNCTION) {
+FAT_OPCODE(CALL_FUNCTION) {
     x = call_function(&(STACK_POINTER), oparg);
     PUSH(x);
     if (x != NULL)
@@ -1320,7 +1330,7 @@ OPCODE(CALL_FUNCTION) {
     
 } END_OPCODE
 
-OPCODE(MAKE_FUNCTION) {
+FAT_OPCODE(MAKE_FUNCTION) {
     v = POP(); /* code object */
     x = PyFunction_New(v, F->f_globals);
     Py_DECREF(v);
@@ -1343,7 +1353,7 @@ OPCODE(MAKE_FUNCTION) {
     CONTINUE(); // XXX this is break in ceval
 } END_OPCODE
 
-OPCODE(MAKE_CLOSURE) {
+FAT_OPCODE(MAKE_CLOSURE) {
     v = POP(); /* code object */
     x = PyFunction_New(v, F->f_globals);
     Py_DECREF(v);
@@ -1370,7 +1380,7 @@ OPCODE(MAKE_CLOSURE) {
     CONTINUE(); // XXX this is break in ceval
 } END_OPCODE
 
-OPCODE(LOAD_ATTR) {
+FAT_OPCODE(LOAD_ATTR) {
     w = GETITEM(NAMES, oparg);
     v = TOP();
     x = PyObject_GetAttr(v, w);
@@ -1380,7 +1390,7 @@ OPCODE(LOAD_ATTR) {
     BREAK();
 } END_OPCODE
 
-OPCODE(STORE_ATTR) {
+FAT_OPCODE(STORE_ATTR) {
     w = GETITEM(NAMES, oparg);
     v = TOP();
     u = SECOND();
@@ -1392,7 +1402,7 @@ OPCODE(STORE_ATTR) {
     BREAK();
 } END_OPCODE
 
-OPCODE(DELETE_ATTR) {
+FAT_OPCODE(DELETE_ATTR) {
     w = GETITEM(NAMES, oparg);
     v = POP();
     err = PyObject_SetAttr(v, w, (PyObject *)NULL);
@@ -1403,7 +1413,7 @@ OPCODE(DELETE_ATTR) {
 } END_OPCODE
 
 
-OPCODE(CALL_FUNCTION_VAR) {
+FAT_OPCODE(CALL_FUNCTION_VAR) {
     int na = oparg & 0xff;
     int nk = (oparg>>8) & 0xff;
     int flags = (opcode - CALL_FUNCTION) & 3;
@@ -1681,7 +1691,7 @@ exec_statement(PyFrameObject *f, PyObject *prog, PyObject *globals,
 	return 0;
 }
 
-OPCODE(IMPORT_NAME) {
+FAT_OPCODE(IMPORT_NAME) {
     w = GETITEM(NAMES, oparg);
     x = PyDict_GetItemString(F->f_builtins, "__import__");
     if (x == NULL) {
@@ -1726,7 +1736,7 @@ OPCODE(IMPORT_NAME) {
     BREAK();
 } END_OPCODE
 
-OPCODE(IMPORT_STAR) {
+FAT_OPCODE(IMPORT_STAR) {
     v = POP();
     PyFrame_FastToLocals(F);
     if ((x = F->f_locals) == NULL) {
@@ -1743,7 +1753,7 @@ OPCODE(IMPORT_STAR) {
     BREAK();
 } END_OPCODE
 
-OPCODE(IMPORT_FROM) {
+FAT_OPCODE(IMPORT_FROM) {
     w = GETITEM(NAMES, oparg);
     v = TOP();
     READ_TIMESTAMP(intr0);
@@ -1754,7 +1764,7 @@ OPCODE(IMPORT_FROM) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BUILD_CLASS) {
+FAT_OPCODE(BUILD_CLASS) {
     u = TOP();
     v = SECOND();
     w = THIRD();
@@ -1767,7 +1777,7 @@ OPCODE(BUILD_CLASS) {
     CONTINUE();
 } END_OPCODE
 
-OPCODE(EXEC_STMT) {
+FAT_OPCODE(EXEC_STMT) {
     w = TOP();
     v = SECOND();
     u = THIRD();
@@ -1781,7 +1791,7 @@ OPCODE(EXEC_STMT) {
     CONTINUE();
 } END_OPCODE
 
-OPCODE(DELETE_NAME) {
+FAT_OPCODE(DELETE_NAME) {
     w = GETITEM(NAMES, oparg);
     if ((x = F->f_locals) != NULL) {
         if ((err = PyObject_DelItem(x, w)) != 0) {
@@ -1797,7 +1807,7 @@ OPCODE(DELETE_NAME) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BUILD_TUPLE) {
+FAT_OPCODE(BUILD_TUPLE) {
     x = PyTuple_New(oparg);
     if (x != NULL) {
         for (; --oparg >= 0;) {
@@ -1843,7 +1853,7 @@ OPCODE(STORE_FAST) {
     CONTINUE();
 } END_OPCODE
 
-OPCODE(DELETE_FAST) {
+FAT_OPCODE(DELETE_FAST) {
     x = GETLOCAL(oparg);
     if (x != NULL) {
         SETLOCAL(oparg, NULL);
@@ -1858,7 +1868,7 @@ OPCODE(DELETE_FAST) {
 
 } END_OPCODE
 
-OPCODE(LOAD_LOCALS) {
+FAT_OPCODE(LOAD_LOCALS) {
     if ((x = F->f_locals) != NULL) {
         Py_INCREF(x);
         PUSH(x);
@@ -1868,7 +1878,7 @@ OPCODE(LOAD_LOCALS) {
     BREAK();
 } END_OPCODE
 
-OPCODE(LOAD_GLOBAL) {
+FAT_OPCODE(LOAD_GLOBAL) {
     w = GETITEM(NAMES, oparg);
     if (PyString_CheckExact(w)) {
         /* Inline the PyDict_GetItem() calls.
@@ -1922,7 +1932,7 @@ OPCODE(LOAD_GLOBAL) {
     CONTINUE();
 } END_OPCODE
 
-OPCODE(STORE_GLOBAL) {
+FAT_OPCODE(STORE_GLOBAL) {
     w = GETITEM(NAMES, oparg);
     v = POP();
     err = PyDict_SetItem(F->f_globals, w, v);
@@ -1931,7 +1941,7 @@ OPCODE(STORE_GLOBAL) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BINARY_SUBSCR) {
+FAT_OPCODE(BINARY_SUBSCR) {
     w = POP();
     v = TOP();
     if (PyList_CheckExact(v) && PyInt_CheckExact(w)) {
@@ -1956,7 +1966,7 @@ OPCODE(BINARY_SUBSCR) {
     BREAK();
 } END_OPCODE
 
-OPCODE(STORE_SUBSCR) {
+FAT_OPCODE(STORE_SUBSCR) {
     w = TOP();
     v = SECOND();
     u = THIRD();
@@ -1970,7 +1980,7 @@ OPCODE(STORE_SUBSCR) {
     BREAK();
 } END_OPCODE
 
-OPCODE(DELETE_SUBSCR) {
+FAT_OPCODE(DELETE_SUBSCR) {
     w = TOP();
     v = SECOND();
     STACKADJ(-2);
@@ -1982,7 +1992,7 @@ OPCODE(DELETE_SUBSCR) {
     BREAK();
 } END_OPCODE
 
-OPCODE(LIST_APPEND) {
+FAT_OPCODE(LIST_APPEND) {
     w = POP();
     v = POP();
     err = PyList_Append(v, w);
@@ -1994,14 +2004,14 @@ OPCODE(LIST_APPEND) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BUILD_MAP) {
+FAT_OPCODE(BUILD_MAP) {
     x = PyDict_New();
     PUSH(x);
     if (x != NULL) CONTINUE();
     BREAK();
 } END_OPCODE
 
-OPCODE(PRINT_EXPR) {
+FAT_OPCODE(PRINT_EXPR) {
     v = POP();
     w = PySys_GetObject("displayhook");
     if (w == NULL) {
@@ -2027,7 +2037,7 @@ OPCODE(PRINT_EXPR) {
     BREAK();
 } END_OPCODE
 
-OPCODE(UNARY_POSITIVE) {
+FAT_OPCODE(UNARY_POSITIVE) {
     v = TOP();
     x = PyNumber_Positive(v);
     Py_DECREF(v);
@@ -2036,7 +2046,7 @@ OPCODE(UNARY_POSITIVE) {
     BREAK();
 } END_OPCODE
 
-OPCODE(UNARY_NEGATIVE) {
+FAT_OPCODE(UNARY_NEGATIVE) {
     v = TOP();
     x = PyNumber_Negative(v);
     Py_DECREF(v);
@@ -2045,7 +2055,7 @@ OPCODE(UNARY_NEGATIVE) {
     BREAK();
 } END_OPCODE
 
-OPCODE(UNARY_NOT) {
+FAT_OPCODE(UNARY_NOT) {
     v = TOP();
     err = PyObject_IsTrue(v);
     Py_DECREF(v);
@@ -2064,7 +2074,7 @@ OPCODE(UNARY_NOT) {
     BREAK();
 } END_OPCODE
 
-OPCODE(UNARY_CONVERT) {
+FAT_OPCODE(UNARY_CONVERT) {
     v = TOP();
     x = PyObject_Repr(v);
     Py_DECREF(v);
@@ -2073,7 +2083,7 @@ OPCODE(UNARY_CONVERT) {
     BREAK();
 } END_OPCODE
 
-OPCODE(UNARY_INVERT) {
+FAT_OPCODE(UNARY_INVERT) {
     v = TOP();
     x = PyNumber_Invert(v);
     Py_DECREF(v);
@@ -2082,7 +2092,7 @@ OPCODE(UNARY_INVERT) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BINARY_POWER) {
+FAT_OPCODE(BINARY_POWER) {
     w = POP();
     v = TOP();
     x = PyNumber_Power(v, w, Py_None);
@@ -2093,7 +2103,7 @@ OPCODE(BINARY_POWER) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BINARY_MULTIPLY) {
+FAT_OPCODE(BINARY_MULTIPLY) {
     w = POP();
     v = TOP();
     x = PyNumber_Multiply(v, w);
@@ -2104,7 +2114,7 @@ OPCODE(BINARY_MULTIPLY) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BINARY_DIVIDE) {
+FAT_OPCODE(BINARY_DIVIDE) {
     if (opcode == BINARY_DIVIDE && !_Py_QnewFlag) {
         w = POP();
         v = TOP();
@@ -2128,7 +2138,7 @@ OPCODE(BINARY_DIVIDE) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BINARY_FLOOR_DIVIDE) {
+FAT_OPCODE(BINARY_FLOOR_DIVIDE) {
     w = POP();
     v = TOP();
     x = PyNumber_FloorDivide(v, w);
@@ -2138,7 +2148,7 @@ OPCODE(BINARY_FLOOR_DIVIDE) {
     if (x != NULL) CONTINUE();
 } END_OPCODE
 
-OPCODE(BINARY_MODULO) {
+FAT_OPCODE(BINARY_MODULO) {
     w = POP();
     v = TOP();
     x = PyNumber_Remainder(v, w);
@@ -2229,7 +2239,7 @@ string_concatenate(PyObject *v, PyObject *w,
 	}
 }
 
-OPCODE(BINARY_ADD) {
+FAT_OPCODE(BINARY_ADD) {
     w = POP();
     v = TOP();
     if (PyInt_CheckExact(v) && PyInt_CheckExact(w)) {
@@ -2260,7 +2270,7 @@ OPCODE(BINARY_ADD) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BINARY_SUBTRACT) {
+FAT_OPCODE(BINARY_SUBTRACT) {
     w = POP();
     v = TOP();
     if (PyInt_CheckExact(v) && PyInt_CheckExact(w)) {
@@ -2348,7 +2358,7 @@ assign_slice(PyObject *u, PyObject *v, PyObject *w, PyObject *x)
 	}
 }
 
-OPCODE(SLICE) {
+FAT_OPCODE(SLICE) {
     if ((opcode-SLICE) & 2)
         w = POP();
     else
@@ -2367,7 +2377,7 @@ OPCODE(SLICE) {
     BREAK();
 } END_OPCODE
 
-OPCODE(STORE_SLICE) {
+FAT_OPCODE(STORE_SLICE) {
     if ((opcode-STORE_SLICE) & 2)
         w = POP();
     else
@@ -2387,7 +2397,7 @@ OPCODE(STORE_SLICE) {
     BREAK();
 } END_OPCODE
 
-OPCODE(DELETE_SLICE) {
+FAT_OPCODE(DELETE_SLICE) {
     if ((opcode-DELETE_SLICE) & 2)
         w = POP();
     else
@@ -2485,7 +2495,7 @@ Error:
 	return 0;
 }
 
-OPCODE(UNPACK_SEQUENCE) {
+FAT_OPCODE(UNPACK_SEQUENCE) {
     v = POP();
     if (PyTuple_CheckExact(v) && PyTuple_GET_SIZE(v) == oparg) {
         PyObject **items = ((PyTupleObject *)v)->ob_item;
@@ -2521,7 +2531,7 @@ OPCODE(BREAK_LOOP) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BINARY_LSHIFT) {
+FAT_OPCODE(BINARY_LSHIFT) {
     w = POP();
     v = TOP();
     x = PyNumber_Lshift(v, w);
@@ -2532,7 +2542,7 @@ OPCODE(BINARY_LSHIFT) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BINARY_RSHIFT) {
+FAT_OPCODE(BINARY_RSHIFT) {
     w = POP();
     v = TOP();
     x = PyNumber_Rshift(v, w);
@@ -2543,7 +2553,7 @@ OPCODE(BINARY_RSHIFT) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BINARY_AND) {
+FAT_OPCODE(BINARY_AND) {
     w = POP();
     v = TOP();
     x = PyNumber_And(v, w);
@@ -2554,7 +2564,7 @@ OPCODE(BINARY_AND) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BINARY_XOR) {
+FAT_OPCODE(BINARY_XOR) {
     w = POP();
     v = TOP();
     x = PyNumber_Xor(v, w);
@@ -2565,7 +2575,7 @@ OPCODE(BINARY_XOR) {
     BREAK();
 } END_OPCODE
 
-OPCODE(BINARY_OR) {
+FAT_OPCODE(BINARY_OR) {
     w = POP();
     v = TOP();
     x = PyNumber_Or(v, w);
@@ -2576,7 +2586,7 @@ OPCODE(BINARY_OR) {
     BREAK();
 } END_OPCODE
 
-OPCODE(INPLACE_POWER) {
+FAT_OPCODE(INPLACE_POWER) {
     w = POP();
     v = TOP();
     x = PyNumber_InPlacePower(v, w, Py_None);
@@ -2587,7 +2597,7 @@ OPCODE(INPLACE_POWER) {
     BREAK();
 } END_OPCODE
 
-OPCODE(INPLACE_MULTIPLY) {
+FAT_OPCODE(INPLACE_MULTIPLY) {
     w = POP();
     v = TOP();
     x = PyNumber_InPlaceMultiply(v, w);
@@ -2598,7 +2608,7 @@ OPCODE(INPLACE_MULTIPLY) {
     BREAK();
 } END_OPCODE
 
-OPCODE(INPLACE_DIVIDE) {
+FAT_OPCODE(INPLACE_DIVIDE) {
     if (opcode == INPLACE_DIVIDE && !_Py_QnewFlag) {
         w = POP();
         v = TOP();
@@ -2622,7 +2632,7 @@ OPCODE(INPLACE_DIVIDE) {
     BREAK();
 } END_OPCODE
 
-OPCODE(INPLACE_FLOOR_DIVIDE) {
+FAT_OPCODE(INPLACE_FLOOR_DIVIDE) {
     w = POP();
     v = TOP();
     x = PyNumber_InPlaceFloorDivide(v, w);
@@ -2633,7 +2643,7 @@ OPCODE(INPLACE_FLOOR_DIVIDE) {
     BREAK();
 } END_OPCODE
 
-OPCODE(INPLACE_MODULO) {
+FAT_OPCODE(INPLACE_MODULO) {
     w = POP();
     v = TOP();
     x = PyNumber_InPlaceRemainder(v, w);
@@ -2644,7 +2654,7 @@ OPCODE(INPLACE_MODULO) {
     BREAK();
 } END_OPCODE
 
-OPCODE(INPLACE_ADD) {
+FAT_OPCODE(INPLACE_ADD) {
     w = POP();
     v = TOP();
     if (PyInt_CheckExact(v) && PyInt_CheckExact(w)) {
@@ -2675,7 +2685,7 @@ OPCODE(INPLACE_ADD) {
     BREAK();
 } END_OPCODE
 
-OPCODE(INPLACE_SUBTRACT) {
+FAT_OPCODE(INPLACE_SUBTRACT) {
     w = POP();
     v = TOP();
     if (PyInt_CheckExact(v) && PyInt_CheckExact(w)) {
@@ -2699,7 +2709,7 @@ OPCODE(INPLACE_SUBTRACT) {
     BREAK();
 } END_OPCODE
 
-OPCODE(INPLACE_LSHIFT) {
+FAT_OPCODE(INPLACE_LSHIFT) {
     w = POP();
     v = TOP();
     x = PyNumber_InPlaceLshift(v, w);
@@ -2710,7 +2720,7 @@ OPCODE(INPLACE_LSHIFT) {
     BREAK();
 } END_OPCODE
 
-OPCODE(INPLACE_RSHIFT) {
+FAT_OPCODE(INPLACE_RSHIFT) {
     w = POP();
     v = TOP();
     x = PyNumber_InPlaceRshift(v, w);
@@ -2721,7 +2731,7 @@ OPCODE(INPLACE_RSHIFT) {
     BREAK();
 } END_OPCODE
 
-OPCODE(INPLACE_AND) {
+FAT_OPCODE(INPLACE_AND) {
     w = POP();
     v = TOP();
     x = PyNumber_InPlaceAnd(v, w);
@@ -2732,7 +2742,7 @@ OPCODE(INPLACE_AND) {
     BREAK();
 } END_OPCODE
 
-OPCODE(INPLACE_XOR) {
+FAT_OPCODE(INPLACE_XOR) {
     w = POP();
     v = TOP();
     x = PyNumber_InPlaceXor(v, w);
@@ -2743,7 +2753,7 @@ OPCODE(INPLACE_XOR) {
     BREAK();
 } END_OPCODE
 
-OPCODE(INPLACE_OR) {
+FAT_OPCODE(INPLACE_OR) {
     w = POP();
     v = TOP();
     x = PyNumber_InPlaceOr(v, w);
@@ -2754,7 +2764,7 @@ OPCODE(INPLACE_OR) {
     BREAK();
 } END_OPCODE
 
-OPCODE(LOAD_CLOSURE) {
+FAT_OPCODE(LOAD_CLOSURE) {
     PyObject** freevars = F->f_localsplus + F->f_code->co_nlocals;
     x = freevars[oparg];
     Py_INCREF(x);
@@ -2763,7 +2773,7 @@ OPCODE(LOAD_CLOSURE) {
     BREAK();
 } END_OPCODE
 
-OPCODE(LOAD_DEREF) {
+FAT_OPCODE(LOAD_DEREF) {
     PyObject** freevars = F->f_localsplus + F->f_code->co_nlocals;
     x = freevars[oparg];
     w = PyCell_Get(x);
@@ -2794,7 +2804,7 @@ OPCODE(LOAD_DEREF) {
     BREAK();
 } END_OPCODE
 
-OPCODE(STORE_DEREF) {
+FAT_OPCODE(STORE_DEREF) {
     PyObject** freevars = F->f_localsplus + F->f_code->co_nlocals;
     w = POP();
     x = freevars[oparg];
