@@ -2752,3 +2752,32 @@ OPCODE(STORE_DEREF) {
     Py_DECREF(w);
     CONTINUE();
 } END_OPCODE
+
+OPCODE(DUP_TOPX) {
+    if (oparg == 2) {
+        x = TOP();
+        Py_INCREF(x);
+        w = SECOND();
+        Py_INCREF(w);
+        STACKADJ(2);
+        SET_TOP(x);
+        SET_SECOND(w);
+        CONTINUE();
+    } else if (oparg == 3) {
+        x = TOP();
+        Py_INCREF(x);
+        w = SECOND();
+        Py_INCREF(w);
+        v = THIRD();
+        Py_INCREF(v);
+        STACKADJ(3);
+        SET_TOP(x);
+        SET_SECOND(w);
+        SET_THIRD(v);
+        CONTINUE();
+    }
+    Py_FatalError("invalid argument to DUP_TOPX"
+                  " (bytecode corruption?)");
+    BREAK();
+
+} END_OPCODE

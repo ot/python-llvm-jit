@@ -393,6 +393,7 @@ protected:
 
         REGISTER_OPCODE(POP_TOP, true);
         REGISTER_OPCODE(DUP_TOP, true);
+        REGISTER_OPCODE(DUP_TOPX, true);
 
         REGISTER_OPCODE(SETUP_LOOP, true);
         REGISTER_ALIAS(SETUP_EXCEPT, SETUP_LOOP);
