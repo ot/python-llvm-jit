@@ -19,6 +19,7 @@
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Analysis/LoopPass.h>
+#include <llvm/CallingConv.h>
 
 #include "Python.h"
 #include "opcode.h"
@@ -41,8 +42,8 @@ public:
         MemoryBuffer* buffer = MemoryBuffer::getFile("vm_runtime.bc");
         assert(buffer);				
         MP = getBitcodeModuleProvider(buffer);
-        the_module = MP->getModule();
-        EE = ExecutionEngine::create(MP, false);
+        the_module = MP->materializeModule(); // XXX materialize needed for inlining?
+        EE = ExecutionEngine::create(MP, false, 0, false);
 
         const Type* ty_pyframe = the_module->getTypeByName("struct.PyFrameObject");
         assert(ty_pyframe);
@@ -61,10 +62,11 @@ public:
         ty_jitted_function = FunctionType::get(ty_pyobject_ptr, func_args, false); // XXX return type
 
         opcode_unimplemented = the_module->getFunction("opcode_UNIMPLEMENTED");
+        opcode_unimplemented->setCallingConv(CallingConv::Fast);
         is_top_true = the_module->getFunction("is_top_true");
+        is_top_true->setCallingConv(CallingConv::Fast);
         unwind_stack = the_module->getFunction("unwind_stack");
-
-        MP->materializeModule(); // XXX needed for inlining?
+        unwind_stack->setCallingConv(CallingConv::Fast);
 
         FPM = new FunctionPassManager(MP);
         FPM->add(new TargetData(*EE->getTargetData()));
@@ -166,31 +168,17 @@ public:
 
         IRBuilder<> builder(entry);
   
-        Value* why_var = builder.CreateAlloca(Type::Int32Ty, 0, "why"); 
-        builder.CreateStore(ConstantInt::get(APInt(32, WHY_NOT)), why_var); 
-        Value* retval_var = builder.CreateAlloca(ty_pyobject_ptr,
-                                                 0, "retval");
-
-        Value* sp_var = builder.CreateAlloca(PointerType::getUnqual(ty_pyobject_ptr),
-                                                 0, "stack_pointer");
-        {
-            // initialize the stack pointer
-            CallInst* sp = builder.CreateCall(the_module->getFunction("get_stack_pointer"),
-                                           func_f);
-            builder.CreateStore(sp, sp_var);
-            CallInst* ssp = builder.CreateCall2(the_module->getFunction("set_stack_pointer"),
-                                                func_f,
-                                                ConstantPointerNull::get(PointerType::getUnqual(ty_pyobject_ptr)));
-            to_inline.push_back(sp);
-            to_inline.push_back(ssp);
-        }
+        Value* st_var = builder.CreateAlloca(the_module->getTypeByName("struct.interpreter_state"), 0, "st"); 
+        CallInst* init_st = builder.CreateCall3(the_module->getFunction("init_interpreter_state"), st_var, func_f, func_tstate);
+        to_inline.push_back(init_st);
 
         Value* dispatch_var = builder.CreateAlloca(Type::Int32Ty, 0, "dispatch_to_instr"); 
         
         BasicBlock* end_block = BasicBlock::Create("end", func);
         {
             builder.SetInsertPoint(end_block);
-            Value* retvalval = builder.CreateLoad(retval_var);
+            CallInst* retvalval = builder.CreateCall(the_module->getFunction("get_retval"), st_var);
+            to_inline.push_back(retvalval);
             builder.CreateRet(retvalval);
         }
         // create the opcode blocks
@@ -229,7 +217,7 @@ public:
 
 
         builder.SetInsertPoint(gen_throw_block);
-        builder.CreateStore(ConstantInt::get(APInt(32, WHY_EXCEPTION)), why_var);
+        to_inline.push_back(builder.CreateCall2(the_module->getFunction("set_why"), st_var, ConstantInt::get(APInt(32, WHY_EXCEPTION))));
         builder.CreateBr(block_end_block);
         
         // fill in the opcode blocks
@@ -245,15 +233,11 @@ public:
 
             builder.SetInsertPoint(opblocks[line]);
 
-            SmallVector<Value*, 7> opcode_args;
-            opcode_args.push_back(func_f);
-            opcode_args.push_back(sp_var);
-            opcode_args.push_back(func_tstate);
+            SmallVector<Value*, 4> opcode_args;
+            opcode_args.push_back(st_var);
             opcode_args.push_back(ConstantInt::get(APInt(32, line)));
             opcode_args.push_back(ConstantInt::get(APInt(32, opcode)));
             opcode_args.push_back(ConstantInt::get(APInt(32, oparg)));
-            opcode_args.push_back(why_var);
-            opcode_args.push_back(retval_var);
 
             Function* ophandler;
             CallInst* opret;
@@ -263,7 +247,8 @@ public:
             else ophandler = opcode_unimplemented;                      \
             assert(ophandler);                                          \
             opret = builder.CreateCall(ophandler, opcode_args.begin(), opcode_args.end()); \
-            if (inline_opcode[opcode]) to_inline.push_back(opret);       \
+            opret->setCallingConv(CallingConv::Fast);                   \
+            /*if (inline_opcode[opcode]) to_inline.push_back(opret); */ \
             /**/
       
             switch(opcode) {
@@ -286,7 +271,8 @@ public:
                 int true_line = line + 3;
                 int false_line = line + 3 + oparg;
                 if (opcode == JUMP_IF_TRUE) std::swap(true_line, false_line);
-                CallInst* cond = builder.CreateCall2(is_top_true, func_f, sp_var);
+                CallInst* cond = builder.CreateCall(is_top_true, st_var);
+                cond->setCallingConv(CallingConv::Fast);
                 to_inline.push_back(cond);
                 Value* bcond = builder.CreateICmpEQ(cond, ConstantInt::get(APInt(32, 1)));
                 builder.CreateCondBr(bcond, opblocks[true_line], opblocks[false_line]);
@@ -295,6 +281,7 @@ public:
 
             case FOR_ITER: {
                 opret = builder.CreateCall(opcode_funcs[opcode], opcode_args.begin(), opcode_args.end());
+                opret->setCallingConv(CallingConv::Fast);       \
                 to_inline.push_back(opret);
                 SwitchInst* sw = builder.CreateSwitch(opret, fill_lasti_block);
                 sw->addCase(ConstantInt::get(APInt(32, 0)), block_end_block); // error
@@ -327,15 +314,9 @@ public:
         builder.CreateBr(block_end_block);
 
         builder.SetInsertPoint(block_end_block);
-        SmallVector<Value*, 6> args;
-        args.push_back(func_f);
-        args.push_back(sp_var);
-        args.push_back(func_tstate);
-        args.push_back(why_var);
-        args.push_back(retval_var);
-        args.push_back(dispatch_var);
         
-        CallInst* do_jump = builder.CreateCall(unwind_stack, args.begin(), args.end());
+        CallInst* do_jump = builder.CreateCall2(unwind_stack, st_var, dispatch_var);
+        do_jump->setCallingConv(CallingConv::Fast);
         //to_inline.push_back(do_jump);
         Value* b_do_jump = builder.CreateICmpEQ(do_jump, ConstantInt::get(APInt(32, 1)));
         builder.CreateCondBr(b_do_jump, dispatch_block, end_block);
@@ -361,7 +342,8 @@ protected:
         {                                                               \
             Function* ophandler = the_module->getFunction("opcode_" #OPCODENAME); \
             opcode_funcs[OPCODENAME] = ophandler;                       \
-            inline_opcode[OPCODENAME] = INLINE;                          \
+            inline_opcode[OPCODENAME] = INLINE;                         \
+            ophandler->setCallingConv(CallingConv::Fast);               \
         }                                                               \
         /**/
         
@@ -574,8 +556,14 @@ void finalize_jitted_function(PyCodeObject* co)
 
 #ifdef JIT_TEST
 
+#include <llvm/Support/CommandLine.h>
+
 int main(int argc, char** argv) {
     Py_InitializeEx(0);
+
+    //char* args[] = {"", "-debug-only=jit"};
+    char* args[] = {"", "-print-machineinstrs"};
+    llvm::cl::ParseCommandLineOptions(2, args);
 
     // C or C++ do not have a function "read a file into a string"????
 #define MAXCODE 10000

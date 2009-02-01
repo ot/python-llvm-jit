@@ -13,8 +13,53 @@
 extern volatile int _Py_Ticker;
 extern int _Py_CheckInterval;
 
-#define OPCODE(OPCODENAME)                                                  \
-    int opcode_##OPCODENAME (PyFrameObject* f, PyObject*** stack_pointer, PyThreadState* tstate, int line, int opcode, int oparg, int* why, PyObject** retval) { \
+typedef struct {
+    PyFrameObject* f;
+    PyObject** stack_pointer;
+    PyThreadState* tstate;
+
+    PyCodeObject* co;
+    PyObject* names;
+    PyObject* consts;
+    PyObject** fastlocals;
+
+    int why;
+    PyObject* retval;
+} interpreter_state;
+
+#define F (st->f)
+#define STACK_POINTER (st->stack_pointer)
+#define TSTATE (st->tstate)
+
+#define CO (st->co)
+#define NAMES (st->names)
+#define CONSTS (st->consts)
+#define FASTLOCALS (st->fastlocals)
+
+#define WHY (st->why)
+#define RETVAL (st->retval)
+
+__attribute__((used)) static void
+init_interpreter_state(interpreter_state* st, PyFrameObject* f, PyThreadState* tstate) {
+    F = f;
+    STACK_POINTER = f->f_stacktop;
+    f->f_stacktop = 0;
+
+    TSTATE = tstate;
+
+    CO = f->f_code;
+    NAMES = st->co->co_names;
+    CONSTS = st->co->co_consts;
+    FASTLOCALS = f->f_localsplus;
+    
+    WHY = WHY_NOT;
+    RETVAL = 0;
+}
+
+
+#define OPCODE(OPCODENAME)                                             \
+    __attribute__((used)) static int                                   \
+    opcode_##OPCODENAME (interpreter_state* st, int line, int opcode, int oparg) { \
         int err = 0;                                                    \
         PyObject* v = 0;                                                \
         PyObject* x = Py_None;                                          \
@@ -23,13 +68,10 @@ extern int _Py_CheckInterval;
         PyObject* z = 0;                                                \
         PyObject* u = 0;                                                \
         PyObject* stream = 0;                                           \
-        PyCodeObject *co = f->f_code;                                   \
-        PyObject* names = co->co_names;                                 \
-        PyObject* consts = co->co_consts;                               \
         int ret = 1;                                                    \
         if (--_Py_Ticker < 0 && opcode != SETUP_FINALLY)                \
-            if (!do_periodic_things(tstate)) {                          \
-                *why = WHY_EXCEPTION;                                   \
+            if (!do_periodic_things(TSTATE)) {                          \
+                WHY = WHY_EXCEPTION;                                   \
                 BREAK();                                                \
             }                                                           \
         //printf("Executing opcode %d with oparg %d\n", opcode, oparg); 
@@ -40,7 +82,6 @@ extern int _Py_CheckInterval;
         /* to silent down the warnings */                               \
         (void)v; (void)x; (void)y; (void)w; (void)z;                    \
         (void)u; (void)stream; (void)err;                               \
-        (void)names; (void)consts;                                      \
         return ret;                                                     \
         }                                                               \
         /**/                                                                            
@@ -54,19 +95,19 @@ extern int _Py_CheckInterval;
 #define BREAK() RETURN(0)
 #define CONTINUE() RETURN(1)
 
-#define STACK_LEVEL()	((int)((*stack_pointer) - f->f_valuestack))
+#define STACK_LEVEL()	((int)((STACK_POINTER) - F->f_valuestack))
 #define EMPTY()		(STACK_LEVEL() == 0)
-#define TOP()		((*stack_pointer)[-1])
-#define SECOND()	((*stack_pointer)[-2])
-#define THIRD() 	((*stack_pointer)[-3])
-#define FOURTH()	((*stack_pointer)[-4])
-#define SET_TOP(v)	((*stack_pointer)[-1] = (v))
-#define SET_SECOND(v)	((*stack_pointer)[-2] = (v))
-#define SET_THIRD(v)	((*stack_pointer)[-3] = (v))
-#define SET_FOURTH(v)	((*stack_pointer)[-4] = (v))
-#define BASIC_STACKADJ(n)	((*stack_pointer) += n)
-#define BASIC_PUSH(v)	(*(*stack_pointer)++ = (v))
-#define BASIC_POP()	(*--(*stack_pointer))
+#define TOP()		((STACK_POINTER)[-1])
+#define SECOND()	((STACK_POINTER)[-2])
+#define THIRD() 	((STACK_POINTER)[-3])
+#define FOURTH()	((STACK_POINTER)[-4])
+#define SET_TOP(v)	((STACK_POINTER)[-1] = (v))
+#define SET_SECOND(v)	((STACK_POINTER)[-2] = (v))
+#define SET_THIRD(v)	((STACK_POINTER)[-3] = (v))
+#define SET_FOURTH(v)	((STACK_POINTER)[-4] = (v))
+#define BASIC_STACKADJ(n)	((STACK_POINTER) += n)
+#define BASIC_PUSH(v)	(*(STACK_POINTER)++ = (v))
+#define BASIC_POP()	(*--(STACK_POINTER))
 
 #define POP() BASIC_POP()
 #define PUSH(v)	BASIC_PUSH(v)
@@ -115,6 +156,14 @@ void set_lasti(PyFrameObject* f, int lasti) {
     f->f_lasti = lasti;
 }
 
+void set_why(interpreter_state* st, int why) {
+    WHY = why;
+}
+
+PyObject* get_retval(interpreter_state* st) {
+    return RETVAL;
+}
+
 extern volatile int things_to_do;
 extern volatile int pendingfirst;
 extern volatile int pendinglast;
@@ -122,7 +171,7 @@ extern volatile int pendinglast;
 extern PyThread_type_lock interpreter_lock; /* This is the GIL */
 extern long main_thread;
 
-int do_periodic_things(PyThreadState* tstate) {
+static int do_periodic_things(PyThreadState* tstate) {
     _Py_Ticker = _Py_CheckInterval;
     tstate->tick_counter++;
 #ifdef WITH_TSC
@@ -179,9 +228,9 @@ OPCODE(UNIMPLEMENTED) {
 } END_OPCODE
 
 OPCODE(STORE_NAME) {
-    w = GETITEM(names, oparg);
+    w = GETITEM(NAMES, oparg);
     v = POP();
-    if ((x = f->f_locals) != NULL) {
+    if ((x = F->f_locals) != NULL) {
         if (PyDict_CheckExact(x))
             err = PyDict_SetItem(x, w, v);
         else
@@ -222,8 +271,8 @@ format_exc_check_arg(PyObject *exc, char *format_str, PyObject *obj)
 }
 
 OPCODE(LOAD_NAME) {
-    w = GETITEM(names, oparg);
-    if ((v = f->f_locals) == NULL) {
+    w = GETITEM(NAMES, oparg);
+    if ((v = F->f_locals) == NULL) {
         PyErr_Format(PyExc_SystemError,
                      "no locals when loading %s",
                      PyObject_REPR(w));
@@ -242,9 +291,9 @@ OPCODE(LOAD_NAME) {
         }
     }
     if (x == NULL) {
-        x = PyDict_GetItem(f->f_globals, w);
+        x = PyDict_GetItem(F->f_globals, w);
         if (x == NULL) {
-            x = PyDict_GetItem(f->f_builtins, w);
+            x = PyDict_GetItem(F->f_builtins, w);
             if (x == NULL) {
                 format_exc_check_arg(
                                      PyExc_NameError,
@@ -259,7 +308,7 @@ OPCODE(LOAD_NAME) {
 } END_OPCODE 
 
 OPCODE(LOAD_CONST) {
-    x = GETITEM(consts, oparg);
+    x = GETITEM(CONSTS, oparg);
     Py_INCREF(x);
     PUSH(x);
     CONTINUE();
@@ -267,8 +316,8 @@ OPCODE(LOAD_CONST) {
 
 
 OPCODE(RETURN_VALUE) {
-    *retval = POP();
-    *why = WHY_RETURN;
+    RETVAL = POP();
+    WHY = WHY_RETURN;
     BREAK();
 } END_OPCODE
 
@@ -420,7 +469,8 @@ OPCODE(DUP_TOP) {
     CONTINUE();
 } END_OPCODE
 
-int is_top_true(PyFrameObject* f, PyObject*** stack_pointer) {
+__attribute__((used)) static int                                
+is_top_true(interpreter_state* st) {
     int err = 0;
     PyObject* w = TOP();
     if (w == Py_True)
@@ -440,7 +490,7 @@ int is_top_true(PyFrameObject* f, PyObject*** stack_pointer) {
 } 
 
 OPCODE(SETUP_LOOP) {
-    PyFrame_BlockSetup(f, opcode, INSTR_OFFSET() + oparg,
+    PyFrame_BlockSetup(F, opcode, INSTR_OFFSET() + oparg,
                        STACK_LEVEL());
     CONTINUE();
 } END_OPCODE
@@ -490,7 +540,7 @@ OPCODE(FOR_ITER) {
 } END_OPCODE
 
 OPCODE(POP_BLOCK) {
-    PyTryBlock *b = PyFrame_BlockPop(f);
+    PyTryBlock *b = PyFrame_BlockPop(F);
     while (STACK_LEVEL() > b->b_level) {
         v = POP();
         Py_DECREF(v);
@@ -618,12 +668,12 @@ OPCODE(RAISE_VARARGS) {
     case 1:
         w = POP(); /* exc */
     case 0: /* Fallthrough */
-        *why = do_raise(w, v, u);
+        WHY = do_raise(w, v, u);
         break;
     default:
         PyErr_SetString(PyExc_SystemError,
                         "bad RAISE_VARARGS oparg");
-        *why = WHY_EXCEPTION;
+        WHY = WHY_EXCEPTION;
         break;
     }
     BREAK();
@@ -740,45 +790,45 @@ set_exc_info(PyThreadState *tstate,
 }
 
 
-int unwind_stack(PyFrameObject* f, PyObject*** stack_pointer, PyThreadState* tstate, int* why, PyObject** retval, int* jump_to) {
+int unwind_stack(interpreter_state* st, int* jump_to) {
     int ret = 0;
 
     PyObject* v;
     
-    if (*why == WHY_YIELD)
+    if (WHY == WHY_YIELD)
         BREAK();
     
-    if (*why == WHY_NOT) {
-        *why = WHY_EXCEPTION;
+    if (WHY == WHY_NOT) {
+        WHY = WHY_EXCEPTION;
     }
     
     /* Log traceback info if this is a real exception */
     
-    if (*why == WHY_EXCEPTION) {
+    if (WHY == WHY_EXCEPTION) {
         // XXX this is not under fast_block_end
-        PyTraceBack_Here(f);
+        PyTraceBack_Here(F);
         
 //         if (tstate->c_tracefunc != NULL)
 //             call_exc_trace(tstate->c_tracefunc,
 //                            tstate->c_traceobj, f);
     }
 
-    if (*why == WHY_RERAISE)
-        *why = WHY_EXCEPTION;
+    if (WHY == WHY_RERAISE)
+        WHY = WHY_EXCEPTION;
     
     // fast_block_end:
-    while (*why != WHY_NOT && f->f_iblock > 0) {
-        PyTryBlock *b = PyFrame_BlockPop(f);
+    while (WHY != WHY_NOT && F->f_iblock > 0) {
+        PyTryBlock *b = PyFrame_BlockPop(F);
 
-        assert(*why != WHY_YIELD);
-        if (b->b_type == SETUP_LOOP && *why == WHY_CONTINUE) {
+        assert(WHY != WHY_YIELD);
+        if (b->b_type == SETUP_LOOP && WHY == WHY_CONTINUE) {
             /* For a continue inside a try block,
                don't pop the block for the loop. */
-            PyFrame_BlockSetup(f, b->b_type, b->b_handler,
+            PyFrame_BlockSetup(F, b->b_type, b->b_handler,
                                b->b_level);
-            *why = WHY_NOT;
-            *jump_to = PyInt_AS_LONG(*retval);
-            Py_DECREF(*retval);
+            WHY = WHY_NOT;
+            *jump_to = PyInt_AS_LONG(RETVAL);
+            Py_DECREF(RETVAL);
             break;
         }
 
@@ -786,15 +836,15 @@ int unwind_stack(PyFrameObject* f, PyObject*** stack_pointer, PyThreadState* tst
             v = POP();
             Py_XDECREF(v);
         }
-        if (b->b_type == SETUP_LOOP && *why == WHY_BREAK) {
-            *why = WHY_NOT;
+        if (b->b_type == SETUP_LOOP && WHY == WHY_BREAK) {
+            WHY = WHY_NOT;
             *jump_to = b->b_handler;
             break;
         }
         if (b->b_type == SETUP_FINALLY ||
             (b->b_type == SETUP_EXCEPT &&
-             *why == WHY_EXCEPTION)) {
-            if (*why == WHY_EXCEPTION) {
+             WHY == WHY_EXCEPTION)) {
+            if (WHY == WHY_EXCEPTION) {
                 PyObject *exc, *val, *tb;
                 PyErr_Fetch(&exc, &val, &tb);
                 if (val == NULL) {
@@ -809,7 +859,7 @@ int unwind_stack(PyFrameObject* f, PyObject*** stack_pointer, PyThreadState* tst
                 if (b->b_type == SETUP_EXCEPT) {
                     PyErr_NormalizeException(
                                              &exc, &val, &tb);
-                    set_exc_info(tstate,
+                    set_exc_info(TSTATE,
                                  exc, val, tb);
                 }
                 if (tb == NULL) {
@@ -821,30 +871,30 @@ int unwind_stack(PyFrameObject* f, PyObject*** stack_pointer, PyThreadState* tst
                 PUSH(exc);
             }
             else {
-                if (*why & (WHY_RETURN | WHY_CONTINUE))
-                    PUSH(*retval);
-                v = PyInt_FromLong((long)why);
+                if (WHY & (WHY_RETURN | WHY_CONTINUE))
+                    PUSH(RETVAL);
+                v = PyInt_FromLong((long)WHY);
                 PUSH(v);
             }
-            *why = WHY_NOT;
+            WHY = WHY_NOT;
             *jump_to = b->b_handler;
             break;
         }
     } /* unwind stack */
     
-    if (*why == WHY_NOT) {
+    if (WHY == WHY_NOT) {
         CONTINUE();
     }
 
-    assert(*why != WHY_YIELD);
+    assert(WHY != WHY_YIELD);
     /* Pop remaining stack entries. */
     while (!EMPTY()) {
         v = POP();
         Py_XDECREF(v);
     }
 
-    if (*why != WHY_RETURN)
-        *retval = NULL;
+    if (WHY != WHY_RETURN)
+        RETVAL = NULL;
 
     BREAK();
 
@@ -855,27 +905,27 @@ int unwind_stack(PyFrameObject* f, PyObject*** stack_pointer, PyThreadState* tst
 OPCODE(END_FINALLY) {
     v = POP();
     if (PyInt_Check(v)) {
-        *why = (enum why_code) PyInt_AS_LONG(v);
-        assert(*why != WHY_YIELD);
-        if (*why == WHY_RETURN ||
-            *why == WHY_CONTINUE)
-            *retval = POP();
+        WHY = (enum why_code) PyInt_AS_LONG(v);
+        assert(WHY != WHY_YIELD);
+        if (WHY == WHY_RETURN ||
+            WHY == WHY_CONTINUE)
+            RETVAL = POP();
     }
     else if (PyExceptionClass_Check(v) || PyString_Check(v)) {
         w = POP();
         u = POP();
         PyErr_Restore(v, w, u);
-        *why = WHY_RERAISE;
+        WHY = WHY_RERAISE;
         BREAK();
     }
     else if (v != Py_None) {
         PyErr_SetString(PyExc_SystemError,
                         "'finally' pops bad exception");
-        *why = WHY_EXCEPTION;
+        WHY = WHY_EXCEPTION;
     }
     Py_DECREF(v);
     // printf("why: %d\n", why); // XXX
-    if (*why == WHY_NOT)
+    if (WHY == WHY_NOT)
         CONTINUE(); // XXX this is a break in ceval
     else  
         BREAK();
@@ -1035,7 +1085,7 @@ fast_function(PyObject *func, PyObject ***pp_stack, int n, int na, int nk)
 	if (argdefs == NULL && co->co_argcount == n && nk==0 &&
 	    co->co_flags == (CO_OPTIMIZED | CO_NEWLOCALS | CO_NOFREE)) {
 		PyFrameObject *f;
-		PyObject *retval = NULL;
+		PyObject* retval = NULL;
 		PyThreadState *tstate = PyThreadState_GET();
 		PyObject **fastlocals, **stack;
 		int i;
@@ -1262,7 +1312,7 @@ ext_do_call(PyObject *func, PyObject ***pp_stack, int flags, int na, int nk)
 
 
 OPCODE(CALL_FUNCTION) {
-    x = call_function(&(*stack_pointer), oparg);
+    x = call_function(&(STACK_POINTER), oparg);
     PUSH(x);
     if (x != NULL)
         CONTINUE();
@@ -1272,7 +1322,7 @@ OPCODE(CALL_FUNCTION) {
 
 OPCODE(MAKE_FUNCTION) {
     v = POP(); /* code object */
-    x = PyFunction_New(v, f->f_globals);
+    x = PyFunction_New(v, F->f_globals);
     Py_DECREF(v);
     /* XXX Maybe this should be a separate opcode? */
     if (x != NULL && oparg > 0) {
@@ -1295,7 +1345,7 @@ OPCODE(MAKE_FUNCTION) {
 
 OPCODE(MAKE_CLOSURE) {
     v = POP(); /* code object */
-    x = PyFunction_New(v, f->f_globals);
+    x = PyFunction_New(v, F->f_globals);
     Py_DECREF(v);
     if (x != NULL) {
         v = POP();
@@ -1321,7 +1371,7 @@ OPCODE(MAKE_CLOSURE) {
 } END_OPCODE
 
 OPCODE(LOAD_ATTR) {
-    w = GETITEM(names, oparg);
+    w = GETITEM(NAMES, oparg);
     v = TOP();
     x = PyObject_GetAttr(v, w);
     Py_DECREF(v);
@@ -1331,7 +1381,7 @@ OPCODE(LOAD_ATTR) {
 } END_OPCODE
 
 OPCODE(STORE_ATTR) {
-    w = GETITEM(names, oparg);
+    w = GETITEM(NAMES, oparg);
     v = TOP();
     u = SECOND();
     STACKADJ(-2);
@@ -1343,7 +1393,7 @@ OPCODE(STORE_ATTR) {
 } END_OPCODE
 
 OPCODE(DELETE_ATTR) {
-    w = GETITEM(names, oparg);
+    w = GETITEM(NAMES, oparg);
     v = POP();
     err = PyObject_SetAttr(v, w, (PyObject *)NULL);
     /* del v.w */
@@ -1364,7 +1414,7 @@ OPCODE(CALL_FUNCTION_VAR) {
         n++;
     if (flags & CALL_FLAG_KW)
         n++;
-    pfunc = (*stack_pointer) - n - 1;
+    pfunc = (STACK_POINTER) - n - 1;
     func = *pfunc;
 
     if (PyMethod_Check(func)
@@ -1379,14 +1429,14 @@ OPCODE(CALL_FUNCTION_VAR) {
         n++;
     } else
         Py_INCREF(func);
-    sp = (*stack_pointer);
+    sp = (STACK_POINTER);
     READ_TIMESTAMP(intr0);
     x = ext_do_call(func, &sp, flags, na, nk);
     READ_TIMESTAMP(intr1);
-    (*stack_pointer) = sp;
+    (STACK_POINTER) = sp;
     Py_DECREF(func);
 
-    while ((*stack_pointer) > pfunc) {
+    while ((STACK_POINTER) > pfunc) {
         w = POP();
         Py_DECREF(w);
     }
@@ -1397,9 +1447,9 @@ OPCODE(CALL_FUNCTION_VAR) {
 } END_OPCODE
 
 OPCODE(YIELD_VALUE) {
-    *retval = POP();
-    f->f_stacktop = (*stack_pointer); 
-    *why = WHY_YIELD;
+    RETVAL = POP();
+    F->f_stacktop = (STACK_POINTER); 
+    WHY = WHY_YIELD;
     BREAK();
 } END_OPCODE                    
 
@@ -1632,8 +1682,8 @@ exec_statement(PyFrameObject *f, PyObject *prog, PyObject *globals,
 }
 
 OPCODE(IMPORT_NAME) {
-    w = GETITEM(names, oparg);
-    x = PyDict_GetItemString(f->f_builtins, "__import__");
+    w = GETITEM(NAMES, oparg);
+    x = PyDict_GetItemString(F->f_builtins, "__import__");
     if (x == NULL) {
         PyErr_SetString(PyExc_ImportError,
                         "__import__ not found");
@@ -1645,17 +1695,17 @@ OPCODE(IMPORT_NAME) {
     if (PyInt_AsLong(u) != -1 || PyErr_Occurred())
         w = PyTuple_Pack(5,
                          w,
-                         f->f_globals,
-                         f->f_locals == NULL ?
-                         Py_None : f->f_locals,
+                         F->f_globals,
+                         F->f_locals == NULL ?
+                         Py_None : F->f_locals,
                          v,
                          u);
     else
         w = PyTuple_Pack(4,
                          w,
-                         f->f_globals,
-                         f->f_locals == NULL ?
-                         Py_None : f->f_locals,
+                         F->f_globals,
+                         F->f_locals == NULL ?
+                         Py_None : F->f_locals,
                          v);
     Py_DECREF(v);
     Py_DECREF(u);
@@ -1678,8 +1728,8 @@ OPCODE(IMPORT_NAME) {
 
 OPCODE(IMPORT_STAR) {
     v = POP();
-    PyFrame_FastToLocals(f);
-    if ((x = f->f_locals) == NULL) {
+    PyFrame_FastToLocals(F);
+    if ((x = F->f_locals) == NULL) {
         PyErr_SetString(PyExc_SystemError,
                         "no locals found during 'import *'");
         BREAK();
@@ -1687,14 +1737,14 @@ OPCODE(IMPORT_STAR) {
     READ_TIMESTAMP(intr0);
     err = import_all_from(x, v);
     READ_TIMESTAMP(intr1);
-    PyFrame_LocalsToFast(f, 0);
+    PyFrame_LocalsToFast(F, 0);
     Py_DECREF(v);
     if (err == 0) CONTINUE();
     BREAK();
 } END_OPCODE
 
 OPCODE(IMPORT_FROM) {
-    w = GETITEM(names, oparg);
+    w = GETITEM(NAMES, oparg);
     v = TOP();
     READ_TIMESTAMP(intr0);
     x = import_from(v, w);
@@ -1723,7 +1773,7 @@ OPCODE(EXEC_STMT) {
     u = THIRD();
     STACKADJ(-3);
     READ_TIMESTAMP(intr0);
-    err = exec_statement(f, u, v, w);
+    err = exec_statement(F, u, v, w);
     READ_TIMESTAMP(intr1);
     Py_DECREF(u);
     Py_DECREF(v);
@@ -1732,8 +1782,8 @@ OPCODE(EXEC_STMT) {
 } END_OPCODE
 
 OPCODE(DELETE_NAME) {
-    w = GETITEM(names, oparg);
-    if ((x = f->f_locals) != NULL) {
+    w = GETITEM(NAMES, oparg);
+    if ((x = F->f_locals) != NULL) {
         if ((err = PyObject_DelItem(x, w)) != 0) {
             format_exc_check_arg(PyExc_NameError,
                                  NAME_ERROR_MSG ,w);
@@ -1762,7 +1812,7 @@ OPCODE(BUILD_TUPLE) {
 
 /* Local variable macros */
 
-#define GETLOCAL(i)	(f->f_localsplus[i])
+#define GETLOCAL(i)	(FASTLOCALS[i])
 
 /* The SETLOCAL() macro must not DECREF the local variable in-place and
    then store the new value; it must copy the old value to a temporary
@@ -1783,7 +1833,7 @@ OPCODE(LOAD_FAST) {
     }
     format_exc_check_arg(PyExc_UnboundLocalError,
                          UNBOUNDLOCAL_ERROR_MSG,
-                         PyTuple_GetItem(co->co_varnames, oparg));
+                         PyTuple_GetItem(CO->co_varnames, oparg));
     BREAK();
 } END_OPCODE
 
@@ -1802,14 +1852,14 @@ OPCODE(DELETE_FAST) {
     format_exc_check_arg(
                          PyExc_UnboundLocalError,
                          UNBOUNDLOCAL_ERROR_MSG,
-                         PyTuple_GetItem(co->co_varnames, oparg)
+                         PyTuple_GetItem(CO->co_varnames, oparg)
                          );
     BREAK();
 
 } END_OPCODE
 
 OPCODE(LOAD_LOCALS) {
-    if ((x = f->f_locals) != NULL) {
+    if ((x = F->f_locals) != NULL) {
         Py_INCREF(x);
         PUSH(x);
         CONTINUE();
@@ -1819,7 +1869,7 @@ OPCODE(LOAD_LOCALS) {
 } END_OPCODE
 
 OPCODE(LOAD_GLOBAL) {
-    w = GETITEM(names, oparg);
+    w = GETITEM(NAMES, oparg);
     if (PyString_CheckExact(w)) {
         /* Inline the PyDict_GetItem() calls.
            WARNING: this is an extreme speed hack.
@@ -1828,7 +1878,7 @@ OPCODE(LOAD_GLOBAL) {
         if (hash != -1) {
             PyDictObject *d;
             PyDictEntry *e;
-            d = (PyDictObject *)(f->f_globals);
+            d = (PyDictObject *)(F->f_globals);
             e = d->ma_lookup(d, w, hash);
             if (e == NULL) {
                 x = NULL;
@@ -1840,7 +1890,7 @@ OPCODE(LOAD_GLOBAL) {
                 PUSH(x);
                 CONTINUE();
             }
-            d = (PyDictObject *)(f->f_builtins);
+            d = (PyDictObject *)(F->f_builtins);
             e = d->ma_lookup(d, w, hash);
             if (e == NULL) {
                 x = NULL;
@@ -1856,9 +1906,9 @@ OPCODE(LOAD_GLOBAL) {
         }
     }
     /* This is the un-inlined version of the code above */
-    x = PyDict_GetItem(f->f_globals, w);
+    x = PyDict_GetItem(F->f_globals, w);
     if (x == NULL) {
-        x = PyDict_GetItem(f->f_builtins, w);
+        x = PyDict_GetItem(F->f_builtins, w);
         if (x == NULL) {
         load_global_error:
             format_exc_check_arg(
@@ -1873,9 +1923,9 @@ OPCODE(LOAD_GLOBAL) {
 } END_OPCODE
 
 OPCODE(STORE_GLOBAL) {
-    w = GETITEM(names, oparg);
+    w = GETITEM(NAMES, oparg);
     v = POP();
-    err = PyDict_SetItem(f->f_globals, w, v);
+    err = PyDict_SetItem(F->f_globals, w, v);
     Py_DECREF(v);
     if (err == 0) CONTINUE();
     BREAK();
@@ -2194,7 +2244,7 @@ OPCODE(BINARY_ADD) {
     }
     else if (PyString_CheckExact(v) &&
              PyString_CheckExact(w)) {
-        x = string_concatenate(v, w, f);
+        x = string_concatenate(v, w, F);
         /* string_concatenate consumed the ref to v */
         goto skip_decref_vx;
     }
@@ -2455,19 +2505,19 @@ OPCODE(UNPACK_SEQUENCE) {
         }
         CONTINUE();
     } else if (unpack_iterable(v, oparg,
-                               (*stack_pointer) + oparg)) {
-        (*stack_pointer) += oparg;
+                               (STACK_POINTER) + oparg)) {
+        (STACK_POINTER) += oparg;
         CONTINUE();
     } else {
         /* unpack_iterable() raised an exception */
-        *why = WHY_EXCEPTION;
+        WHY = WHY_EXCEPTION;
     }
     Py_DECREF(v);
     BREAK();
 } END_OPCODE
 
 OPCODE(BREAK_LOOP) {
-    *why = WHY_BREAK;
+    WHY = WHY_BREAK;
     BREAK();
 } END_OPCODE
 
@@ -2609,7 +2659,7 @@ OPCODE(INPLACE_ADD) {
     }
     else if (PyString_CheckExact(v) &&
              PyString_CheckExact(w)) {
-        x = string_concatenate(v, w, f); // XXX 
+        x = string_concatenate(v, w, F); // XXX 
         /* string_concatenate consumed the ref to v */
         goto skip_decref_v;
     }
@@ -2705,7 +2755,7 @@ OPCODE(INPLACE_OR) {
 } END_OPCODE
 
 OPCODE(LOAD_CLOSURE) {
-    PyObject** freevars = f->f_localsplus + f->f_code->co_nlocals;
+    PyObject** freevars = F->f_localsplus + F->f_code->co_nlocals;
     x = freevars[oparg];
     Py_INCREF(x);
     PUSH(x);
@@ -2714,7 +2764,7 @@ OPCODE(LOAD_CLOSURE) {
 } END_OPCODE
 
 OPCODE(LOAD_DEREF) {
-    PyObject** freevars = f->f_localsplus + f->f_code->co_nlocals;
+    PyObject** freevars = F->f_localsplus + F->f_code->co_nlocals;
     x = freevars[oparg];
     w = PyCell_Get(x);
     if (w != NULL) {
@@ -2725,8 +2775,8 @@ OPCODE(LOAD_DEREF) {
     /* Don't stomp existing exception */
     if (PyErr_Occurred())
         BREAK();
-    if (oparg < PyTuple_GET_SIZE(co->co_cellvars)) {
-        v = PyTuple_GET_ITEM(co->co_cellvars,
+    if (oparg < PyTuple_GET_SIZE(CO->co_cellvars)) {
+        v = PyTuple_GET_ITEM(CO->co_cellvars,
                              oparg);
         format_exc_check_arg(
                              PyExc_UnboundLocalError,
@@ -2734,8 +2784,8 @@ OPCODE(LOAD_DEREF) {
                              v);
     } else {
         v = PyTuple_GET_ITEM(
-                             co->co_freevars,
-                             oparg - PyTuple_GET_SIZE(co->co_cellvars));
+                             CO->co_freevars,
+                             oparg - PyTuple_GET_SIZE(CO->co_cellvars));
         format_exc_check_arg(
                              PyExc_NameError,
                              UNBOUNDFREE_ERROR_MSG,
@@ -2745,7 +2795,7 @@ OPCODE(LOAD_DEREF) {
 } END_OPCODE
 
 OPCODE(STORE_DEREF) {
-    PyObject** freevars = f->f_localsplus + f->f_code->co_nlocals;
+    PyObject** freevars = F->f_localsplus + F->f_code->co_nlocals;
     w = POP();
     x = freevars[oparg];
     PyCell_Set(x, w);
