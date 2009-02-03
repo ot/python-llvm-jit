@@ -28,12 +28,12 @@ VERSION=	@VERSION@
 srcdir=		@srcdir@
 VPATH=		@srcdir@
 
-CC=		llvm-gcc
-CXX=		llvm-g++
+CC=		@CC@
+CXX=		@CXX@
 MAINCC=		@MAINCC@
-LINKCC=		@LINKCC@
-AR=		ar
-RANLIB=		ranlib
+LINKCC=		g++ #@LINKCC@
+AR=		@AR@
+RANLIB=		@RANLIB@
 SVNVERSION=	@SVNVERSION@
 
 # Shell used by make (some versions default to the login shell, which is bad)
@@ -56,8 +56,8 @@ MAKESETUP=      $(srcdir)/Modules/makesetup
 
 # Compiler options
 OPT=		@OPT@
-BASECFLAGS=	@BASECFLAGS@ 
-CFLAGS=		$(BASECFLAGS) $(OPT) $(EXTRA_CFLAGS) 
+BASECFLAGS=	@BASECFLAGS@
+CFLAGS=		$(BASECFLAGS) $(OPT) $(EXTRA_CFLAGS)
 # Both CPPFLAGS and LDFLAGS need to contain the shell's value for setup.py to
 # be able to build extension modules using the directories specified in the
 # environment variables
@@ -66,13 +66,12 @@ LDFLAGS=	@LDFLAGS@
 LDLAST=		@LDLAST@
 SGI_ABI=	@SGI_ABI@
 CCSHARED=	@CCSHARED@
-LINKFORSHARED=	# @LINKFORSHARED@
+LINKFORSHARED=	@LINKFORSHARED@
 # Extra C flags added for building the interpreter object files.
 CFLAGSFORSHARED=@CFLAGSFORSHARED@
 # C flags used for building the interpreter object files
-PY_CFLAGS=	$(CFLAGS) $(CPPFLAGS) $(CFLAGSFORSHARED) -DPy_BUILD_CORE #-emit-llvm
-# LLVM libraries to link
-LLVM_LDFLAGS= `llvm-config --ldflags --libs core jit native bitreader bitwriter ipo interpreter` -lstdc++.6 -lgcc_s.1
+PY_CFLAGS=	$(CFLAGS) $(CPPFLAGS) $(CFLAGSFORSHARED) -DPy_BUILD_CORE
+
 
 # Machine-dependent subdirectories
 MACHDEP=	@MACHDEP@
@@ -103,7 +102,7 @@ LIBP=		$(LIBDIR)/python$(VERSION)
 
 # Symbols used for using shared libraries
 SO=		@SO@
-LDSHARED=	llvm-ld -native $(LDFLAGS) -bundle -undefined dynamic_lookup
+LDSHARED=	@LDSHARED@
 BLDSHARED=	@BLDSHARED@
 DESTSHARED=	$(BINLIBDEST)/lib-dynload
 
@@ -163,8 +162,8 @@ INSTSONAME=	@INSTSONAME@
 LIBS=		@LIBS@
 LIBM=		@LIBM@
 LIBC=		@LIBC@
-SYSLIBS=	$(LIBM) $(LIBC)
-SHLIBS=		@SHLIBS@
+SYSLIBS=	$(LIBM) $(LIBC) `llvm-config --ldflags --libs core jit native bitreader bitwriter ipo interpreter`
+SHLIBS=		@SHLIBS@ 
 
 THREADOBJ=	@THREADOBJ@
 DLINCLDIR=	@DLINCLDIR@
@@ -338,10 +337,10 @@ LIBRARY_OBJS=	\
 all:		$(BUILDPYTHON) oldsharedmods sharedmods
 
 # Build the interpreter
-$(BUILDPYTHON):	Modules/python.o $(LIBRARY) $(LDLIBRARY) vm_runtime.bc
-		llvm-ld -native -disable-internalize $(LDFLAGS) $(LINKFORSHARED) -o $@ \
+$(BUILDPYTHON):	Modules/python.o $(LIBRARY) $(LDLIBRARY)
+		$(LINKCC) $(LDFLAGS) $(LINKFORSHARED) -o $@ \
 			Modules/python.o \
-			$(BLDLIBRARY) $(LIBS) $(MODLIBS) $(SYSLIBS) $(LLVM_LDFLAGS) $(LDLAST)
+			$(BLDLIBRARY) $(LIBS) $(MODLIBS) $(SYSLIBS) $(LDLAST)
 
 platform: $(BUILDPYTHON)
 	$(RUNSHARED) ./$(BUILDPYTHON) -E -c 'import sys ; from distutils.util import get_platform ; print get_platform()+"-"+sys.version[0:3]' >platform
@@ -480,7 +479,7 @@ $(GRAMMAR_H) $(GRAMMAR_C): $(PGEN) $(GRAMMAR_INPUT)
 		-$(PGEN) $(GRAMMAR_INPUT) $(GRAMMAR_H) $(GRAMMAR_C)
 
 $(PGEN):	$(PGENOBJS)
-		llvm-ld -native $(LDFLAGS) $(PGENOBJS) $(LIBS) -o $(PGEN)
+		$(CC) $(OPT) $(LDFLAGS) $(PGENOBJS) $(LIBS) -o $(PGEN)
 
 Parser/grammar.o:	$(srcdir)/Parser/grammar.c \
 				$(srcdir)/Include/token.h \
