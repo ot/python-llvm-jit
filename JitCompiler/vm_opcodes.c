@@ -74,16 +74,24 @@ init_interpreter_state(interpreter_state* st, PyFrameObject* f, PyThreadState* t
         OPCODE_PREAMBLE                                                \
         /**/
 
-#define FAT_OPCODE(OPCODENAME)                  \
-    int fat_opcode_##OPCODENAME;                \
-    __attribute__((used)) static int                                   \
-    opcode_##OPCODENAME (interpreter_state* st, int line, int opcode, int oparg) { \
-        OPCODE_PREAMBLE                                                 \
+#ifndef NOTHREADS
+#define PERIODIC_CHECKS                                                 \
         if (--_Py_Ticker < 0 && opcode != SETUP_FINALLY)                \
             if (!do_periodic_things(TSTATE)) {                          \
                 WHY = WHY_EXCEPTION;                                    \
                 BREAK();                                                \
             }                                                           \
+        /**/
+#else
+#define PERIODIC_CHECKS
+#endif
+
+#define FAT_OPCODE(OPCODENAME)                  \
+    int fat_opcode_##OPCODENAME;                \
+    __attribute__((used)) static int                                   \
+    opcode_##OPCODENAME (interpreter_state* st, int line, int opcode, int oparg) { \
+        OPCODE_PREAMBLE                                                 \
+        PERIODIC_CHECKS                                                 \
         /**/
 
 
