@@ -1102,5 +1102,6 @@ Python/thread.o: @THREADHEADERS@
 .PHONY: frameworkinstallmaclib frameworkinstallapps frameworkinstallunixtools
 .PHONY: frameworkaltinstallunixtools recheck autoconf clean clobber distclean 
 .PHONY: smelly funny
+.PHONY: JitCompiler/JitCompiler.o vm_runtime.bc
 
 # IF YOU PUT ANYTHING HERE IT WILL GO AWAY
