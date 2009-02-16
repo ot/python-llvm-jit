@@ -20,6 +20,7 @@
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Analysis/LoopPass.h>
 #include <llvm/CallingConv.h>
+#include <llvm/Analysis/Verifier.h>
 
 #include "Python.h"
 #include "opcode.h"
@@ -592,6 +593,10 @@ int main(int argc, char** argv) {
     // show LLVM bitcode
     llvm::Function* cf = jit.compile(co, inlineopcodes);
     cf->dump();
+
+    llvm::PassManager passes;
+    passes.add(llvm::createVerifierPass());
+    passes.run(*cf->getParent());
 
     // try to execute function
     PyThreadState *tstate = PyThreadState_GET();
