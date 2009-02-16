@@ -203,7 +203,6 @@ public:
             dispatch_switch->addCase(ConstantInt::get(APInt(32, line)), opblock);
         }
         
-        BasicBlock* fill_lasti_block = BasicBlock::Create("fill_lasti", func);
         BasicBlock* block_end_block = BasicBlock::Create("block_end", func);
 
         // if throwflag goto block_end else dispatch to opblocks[f_lasti+1]
@@ -256,7 +255,7 @@ public:
             case YIELD_VALUE: // XXX this will have to change (trace?)
             case RETURN_VALUE:
                 DEFAULT_HANDLER;
-                builder.CreateBr(fill_lasti_block);
+                builder.CreateBr(block_end_block);
                 break;
             case JUMP_FORWARD: {
                 int next_line = line + 3 + oparg; // 3 is JUMP_FORWARD + oparg
@@ -284,7 +283,7 @@ public:
                 opret = builder.CreateCall(opcode_funcs[opcode], opcode_args.begin(), opcode_args.end());
                 opret->setCallingConv(CallingConv::Fast);       
                 to_inline.push_back(opret);
-                SwitchInst* sw = builder.CreateSwitch(opret, fill_lasti_block);
+                SwitchInst* sw = builder.CreateSwitch(opret, block_end_block);
                 sw->addCase(ConstantInt::get(APInt(32, 0)), block_end_block); // error
                 sw->addCase(ConstantInt::get(APInt(32, 1)), opblocks[line + 3]); // continue loop
                 sw->addCase(ConstantInt::get(APInt(32, 2)), opblocks[line + 3 + oparg]); // end loop
@@ -295,25 +294,12 @@ public:
                 DEFAULT_HANDLER;
                 int next_line = line + (HAS_ARG(opcode) ? 3 : 1);
                 b_opret = builder.CreateICmpEQ(opret, ConstantInt::get(APInt(32, 1)));
-                builder.CreateCondBr(b_opret, opblocks[next_line], fill_lasti_block);
+                builder.CreateCondBr(b_opret, opblocks[next_line], block_end_block);
                 break;
             }
             }
         }
         
-        builder.SetInsertPoint(fill_lasti_block);
-        PHINode* lasti = builder.CreatePHI(Type::Int32Ty, "lasti");
-        for (std::map<int, BasicBlock*>::const_iterator B = opblocks.begin();
-             B != opblocks.end();
-             ++B)
-            lasti->addIncoming(ConstantInt::get(APInt(32, B->first)), B->second);
-        
-        CallInst* sli = builder.CreateCall2(the_module->getFunction("set_lasti"),
-                                            func_f,
-                                            lasti);
-        to_inline.push_back(sli);
-        builder.CreateBr(block_end_block);
-
         builder.SetInsertPoint(block_end_block);
         
         CallInst* do_jump = builder.CreateCall2(unwind_stack, st_var, dispatch_var);

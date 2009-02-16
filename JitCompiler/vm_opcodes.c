@@ -65,7 +65,6 @@ init_interpreter_state(interpreter_state* st, PyFrameObject* f, PyThreadState* t
         PyObject* z = 0;                                                \
         PyObject* u = 0;                                                \
         PyObject* stream = 0;                                           \
-        int ret = 1;                                                    \
         //printf("Executing opcode %d with oparg %d\n", opcode, oparg); 
 
 #define OPCODE(OPCODENAME)                                             \
@@ -96,21 +95,21 @@ init_interpreter_state(interpreter_state* st, PyFrameObject* f, PyThreadState* t
 
 
 #define END_OPCODE                                                      \
-    end:                                                                \
         /* to silent down the warnings */                               \
         (void)v; (void)x; (void)y; (void)w; (void)z;                    \
         (void)u; (void)stream; (void)err;                               \
-        return ret;                                                     \
         }                                                               \
         /**/                                                                            
 
-#define RETURN(v) do {                            \
-        ret = (v);                                \
-        goto end;                                 \
-    } while(0)                                    \
+#define RETURN(v) return (v)                   \
     /**/
 
-#define BREAK() RETURN(0)
+#define BREAK() do {                            \
+        F->f_lasti = line;                      \
+        RETURN(0);                              \
+    } while (0);                                \
+    /**/
+
 #define CONTINUE() RETURN(1)
 
 #define STACK_LEVEL()	((int)((STACK_POINTER) - F->f_valuestack))
@@ -809,12 +808,10 @@ set_exc_info(PyThreadState *tstate,
 
 
 int unwind_stack(interpreter_state* st, int* jump_to) {
-    int ret = 0;
-
     PyObject* v;
     
     if (WHY == WHY_YIELD)
-        BREAK();
+        RETURN(0);
     
     if (WHY == WHY_NOT) {
         WHY = WHY_EXCEPTION;
@@ -914,10 +911,7 @@ int unwind_stack(interpreter_state* st, int* jump_to) {
     if (WHY != WHY_RETURN)
         RETVAL = NULL;
 
-    BREAK();
-
- end:
-    return ret;
+    RETURN(0);
 }
 
 FAT_OPCODE(END_FINALLY) {
@@ -2154,6 +2148,7 @@ FAT_OPCODE(BINARY_FLOOR_DIVIDE) {
     Py_DECREF(w);
     SET_TOP(x);
     if (x != NULL) CONTINUE();
+    BREAK();
 } END_OPCODE
 
 FAT_OPCODE(BINARY_MODULO) {
