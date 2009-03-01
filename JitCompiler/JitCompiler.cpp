@@ -595,7 +595,9 @@ int main(int argc, char** argv) {
 
     {
         tstate->frame = f;
-        jit.get_func_pointer(cf)(f, tstate, 0);
+        jitted_cfunc_t jitted = jit.get_func_pointer(cf);
+        PyObject* res = jitted(f, tstate, 0);
+        printf("%x\n", (unsigned)res);
     }
     
     Py_DECREF(f);
