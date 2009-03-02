@@ -106,11 +106,11 @@ init_interpreter_state(interpreter_state* st, PyFrameObject* f, PyThreadState* t
 
 #define BREAK() do {                            \
         F->f_lasti = line;                      \
-        RETURN(0);                              \
+        RETURN(1);                              \
     } while (0);                                \
     /**/
 
-#define CONTINUE() RETURN(1)
+#define CONTINUE() RETURN(0)
 
 #define STACK_LEVEL()	((int)((STACK_POINTER) - F->f_valuestack))
 #define EMPTY()		(STACK_LEVEL() == 0)
@@ -811,7 +811,7 @@ int unwind_stack(interpreter_state* st, int* jump_to) {
     PyObject* v;
     
     if (WHY == WHY_YIELD)
-        RETURN(0);
+        RETURN(1);
     
     if (WHY == WHY_NOT) {
         WHY = WHY_EXCEPTION;
@@ -911,7 +911,7 @@ int unwind_stack(interpreter_state* st, int* jump_to) {
     if (WHY != WHY_RETURN)
         RETVAL = NULL;
 
-    RETURN(0);
+    RETURN(1);
 }
 
 FAT_OPCODE(END_FINALLY) {

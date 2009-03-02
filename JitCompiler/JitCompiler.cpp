@@ -138,6 +138,8 @@ public:
             //addPass(PM, mvm::createLowerArrayLengthPass());
         }
 
+        PMverifier.add(llvm::createVerifierPass());
+
         register_opcodes();
     }
   
@@ -274,8 +276,8 @@ public:
                 CallInst* cond = builder.CreateCall(is_top_true, st_var);
                 cond->setCallingConv(CallingConv::Fast);
                 to_inline.push_back(cond);
-                Value* bcond = builder.CreateICmpEQ(cond, ConstantInt::get(APInt(32, 1)));
-                builder.CreateCondBr(bcond, opblocks[true_line], opblocks[false_line]);
+                Value* bcond = builder.CreateICmpEQ(cond, ConstantInt::get(APInt(32, 0)));
+                builder.CreateCondBr(bcond, opblocks[false_line], opblocks[true_line]);
                 break;
             }
 
@@ -284,8 +286,8 @@ public:
                 opret->setCallingConv(CallingConv::Fast);       
                 to_inline.push_back(opret);
                 SwitchInst* sw = builder.CreateSwitch(opret, block_end_block);
-                sw->addCase(ConstantInt::get(APInt(32, 0)), block_end_block); // error
-                sw->addCase(ConstantInt::get(APInt(32, 1)), opblocks[line + 3]); // continue loop
+                sw->addCase(ConstantInt::get(APInt(32, 1)), block_end_block); // error
+                sw->addCase(ConstantInt::get(APInt(32, 0)), opblocks[line + 3]); // continue loop
                 sw->addCase(ConstantInt::get(APInt(32, 2)), opblocks[line + 3 + oparg]); // end loop
                 break;
             }
@@ -293,8 +295,12 @@ public:
             default: {
                 DEFAULT_HANDLER;
                 int next_line = line + (HAS_ARG(opcode) ? 3 : 1);
-                b_opret = builder.CreateICmpEQ(opret, ConstantInt::get(APInt(32, 1)));
-                builder.CreateCondBr(b_opret, opblocks[next_line], block_end_block);
+                b_opret = builder.CreateICmpEQ(opret, ConstantInt::get(APInt(32, 0)));
+                BasicBlock* next_block = opblocks[next_line];
+                if (next_block)
+                    builder.CreateCondBr(b_opret, next_block, block_end_block);
+                else
+                    builder.CreateBr(block_end_block);
                 break;
             }
             }
@@ -305,15 +311,22 @@ public:
         CallInst* do_jump = builder.CreateCall2(unwind_stack, st_var, dispatch_var);
         do_jump->setCallingConv(CallingConv::Fast);
         //to_inline.push_back(do_jump);
-        Value* b_do_jump = builder.CreateICmpEQ(do_jump, ConstantInt::get(APInt(32, 1)));
+        Value* b_do_jump = builder.CreateICmpEQ(do_jump, ConstantInt::get(APInt(32, 0)));
         builder.CreateCondBr(b_do_jump, dispatch_block, end_block);
 
+        //verify_function(func);
+
         if (inlineopcodes) {
-            for (size_t i = 0; i < to_inline.size(); ++i) 
+            for (size_t i = 0; i < to_inline.size(); ++i)  {
                 InlineFunction(to_inline[i]);
+            }
         }
         FPM->run(*func);
         return func;
+    }
+
+    void verify_function(llvm::Function* func) {
+        PMverifier.run(*func->getParent());
     }
 
     jitted_cfunc_t get_func_pointer(llvm::Function* func) {
@@ -472,6 +485,7 @@ protected:
     llvm::Module* the_module;
     llvm::ExecutionEngine* EE;
     llvm::FunctionPassManager* FPM;
+    llvm::PassManager PMverifier;
 
     std::map<int, llvm::Function*> opcode_funcs;
     std::vector<int> fat_opcode;
@@ -554,7 +568,7 @@ int main(int argc, char** argv) {
     //llvm::cl::ParseCommandLineOptions(2, args);
 
     // C or C++ do not have a function "read a file into a string"????
-#define MAXCODE 10000
+#define MAXCODE 65536
     char code[MAXCODE];
     int bytes = fread(code, 1, MAXCODE-1, stdin);
     code[bytes] = 0;
@@ -580,9 +594,7 @@ int main(int argc, char** argv) {
     llvm::Function* cf = jit.compile(co, inlineopcodes);
     cf->dump();
 
-    llvm::PassManager passes;
-    passes.add(llvm::createVerifierPass());
-    passes.run(*cf->getParent());
+    jit.verify_function(cf);
 
     // try to execute function
     PyThreadState *tstate = PyThreadState_GET();
