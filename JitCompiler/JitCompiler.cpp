@@ -1,26 +1,7 @@
 /* -*- c-basic-offset: 4; indent-tabs-mode: nil; mode: c++ -*- */
 
 #include "JitCompiler.h"
-
-#include <llvm/Support/MemoryBuffer.h>
-#include <llvm/Bitcode/ReaderWriter.h>
-
-#include <llvm/Module.h>
-#include <llvm/ModuleProvider.h>
-
-#include <llvm/ExecutionEngine/ExecutionEngine.h>
-#include <llvm/ExecutionEngine/GenericValue.h>
-#include <llvm/DerivedTypes.h>
-#include <llvm/Support/IRBuilder.h>
-#include <llvm/Transforms/Utils/Cloning.h>
-
-#include <llvm/PassManager.h>
-#include <llvm/Target/TargetData.h>
-#include <llvm/Transforms/Scalar.h>
-#include <llvm/Transforms/IPO.h>
-#include <llvm/Analysis/LoopPass.h>
-#include <llvm/CallingConv.h>
-#include <llvm/Analysis/Verifier.h>
+#include "utility.h"
 
 #include "Python.h"
 #include "opcode.h"
@@ -56,10 +37,11 @@ public:
         const Type* ty_pythreadstate = the_module->getTypeByName("struct.PyThreadState");
         ty_pythreadstate_ptr = PointerType::getUnqual(ty_pythreadstate);
 
-        std::vector<const Type*> func_args;
-        func_args.push_back(ty_pyframe_ptr);
-        func_args.push_back(ty_pythreadstate_ptr);
-        func_args.push_back(Type::Int32Ty);
+        std::vector<const Type*> func_args = vector_of
+            (ty_pyframe_ptr)
+            (ty_pythreadstate_ptr)
+            (Type::Int32Ty)
+            .move();
         ty_jitted_function = FunctionType::get(ty_pyobject_ptr, func_args, false); // XXX return type
 
         opcode_unimplemented = the_module->getFunction("opcode_UNIMPLEMENTED");
@@ -165,7 +147,8 @@ public:
         std::vector<CallInst*> to_inline;
 
         const uint8_t* bytecode = (const uint8_t*) PyString_AS_STRING(co->co_code);
-    
+        Py_ssize_t codelen = PyString_Size(co->co_code);
+        
         BasicBlock* entry = BasicBlock::Create("entry", func);
         BasicBlock* gen_throw_block = BasicBlock::Create("gen_throw", func);
 
@@ -191,18 +174,18 @@ public:
         Value* dispatch_val = builder.CreateLoad(dispatch_var);
         SwitchInst* dispatch_switch = builder.CreateSwitch(dispatch_val, end_block);
 
-        std::map<int, BasicBlock*> opblocks; // XXX a vector would be better?
-        char opblockname[20];
+        std::vector<BasicBlock*> opblocks(codelen);
         for (const uint8_t* cur_instr = bytecode; *cur_instr; ++cur_instr) {
             int line = cur_instr - bytecode;
             unsigned int opcode = *cur_instr;
             if (HAS_ARG(opcode)) cur_instr += 2;
             
+            char opblockname[20];
             sprintf(opblockname, "__op_%d", line);
             BasicBlock* opblock = BasicBlock::Create(std::string(opblockname), func);
             
             opblocks[line] = opblock; 
-            dispatch_switch->addCase(ConstantInt::get(APInt(32, line)), opblock);
+            dispatch_switch->addCase(constant(line), opblock);
         }
         
         BasicBlock* block_end_block = BasicBlock::Create("block_end", func);
@@ -212,14 +195,12 @@ public:
         CallInst* gli = builder.CreateCall(the_module->getFunction("get_lasti"),
                                            func_f);
         to_inline.push_back(gli);
-        Value* lastipp = builder.CreateAdd(gli, ConstantInt::get(APInt(32, 1)));
+        Value* lastipp = builder.CreateAdd(gli, constant(1));
         builder.CreateStore(lastipp, dispatch_var);
-        Value* bthrowflag = builder.CreateICmpEQ(func_throwflag, ConstantInt::get(APInt(32, 1))); 
-        builder.CreateCondBr(bthrowflag, gen_throw_block, dispatch_block);
-
+        builder.CreateCondBr(is_zero(builder, func_throwflag), dispatch_block, gen_throw_block);
 
         builder.SetInsertPoint(gen_throw_block);
-        to_inline.push_back(builder.CreateCall2(the_module->getFunction("set_why"), st_var, ConstantInt::get(APInt(32, WHY_EXCEPTION))));
+        to_inline.push_back(builder.CreateCall2(the_module->getFunction("set_why"), st_var, constant(WHY_EXCEPTION)));
         builder.CreateBr(block_end_block);
         
         // fill in the opcode blocks
@@ -235,15 +216,15 @@ public:
 
             builder.SetInsertPoint(opblocks[line]);
 
-            SmallVector<Value*, 4> opcode_args;
-            opcode_args.push_back(st_var);
-            opcode_args.push_back(ConstantInt::get(APInt(32, line)));
-            opcode_args.push_back(ConstantInt::get(APInt(32, opcode)));
-            opcode_args.push_back(ConstantInt::get(APInt(32, oparg)));
+            std::vector<Value*> opcode_args = vector_of
+                (st_var)
+                (constant(line))
+                (constant(opcode))
+                (constant(oparg))
+                .move();
 
             Function* ophandler;
             CallInst* opret;
-            Value* b_opret;
 #           define DEFAULT_HANDLER                                      \
             if (opcode_funcs.count(opcode)) ophandler = opcode_funcs[opcode]; \
             else ophandler = opcode_unimplemented;                      \
@@ -261,6 +242,7 @@ public:
                 break;
             case JUMP_FORWARD: {
                 int next_line = line + 3 + oparg; // 3 is JUMP_FORWARD + oparg
+                assert(next_line < codelen);
                 builder.CreateBr(opblocks[next_line]);
                 break;
             }
@@ -276,8 +258,7 @@ public:
                 CallInst* cond = builder.CreateCall(is_top_true, st_var);
                 cond->setCallingConv(CallingConv::Fast);
                 to_inline.push_back(cond);
-                Value* bcond = builder.CreateICmpEQ(cond, ConstantInt::get(APInt(32, 0)));
-                builder.CreateCondBr(bcond, opblocks[false_line], opblocks[true_line]);
+                builder.CreateCondBr(is_zero(builder, cond), opblocks[false_line], opblocks[true_line]);
                 break;
             }
 
@@ -286,19 +267,17 @@ public:
                 opret->setCallingConv(CallingConv::Fast);       
                 to_inline.push_back(opret);
                 SwitchInst* sw = builder.CreateSwitch(opret, block_end_block);
-                sw->addCase(ConstantInt::get(APInt(32, 1)), block_end_block); // error
-                sw->addCase(ConstantInt::get(APInt(32, 0)), opblocks[line + 3]); // continue loop
-                sw->addCase(ConstantInt::get(APInt(32, 2)), opblocks[line + 3 + oparg]); // end loop
+                sw->addCase(constant(1), block_end_block); // error
+                sw->addCase(constant(0), opblocks[line + 3]); // continue loop
+                sw->addCase(constant(2), opblocks[line + 3 + oparg]); // end loop
                 break;
             }
                 
             default: {
                 DEFAULT_HANDLER;
                 int next_line = line + (HAS_ARG(opcode) ? 3 : 1);
-                b_opret = builder.CreateICmpEQ(opret, ConstantInt::get(APInt(32, 0)));
-                BasicBlock* next_block = opblocks[next_line];
-                if (next_block)
-                    builder.CreateCondBr(b_opret, next_block, block_end_block);
+                if (next_line < codelen)
+                    builder.CreateCondBr(is_zero(builder, opret), opblocks[next_line], block_end_block);
                 else
                     builder.CreateBr(block_end_block);
                 break;
@@ -311,8 +290,7 @@ public:
         CallInst* do_jump = builder.CreateCall2(unwind_stack, st_var, dispatch_var);
         do_jump->setCallingConv(CallingConv::Fast);
         //to_inline.push_back(do_jump);
-        Value* b_do_jump = builder.CreateICmpEQ(do_jump, ConstantInt::get(APInt(32, 0)));
-        builder.CreateCondBr(b_do_jump, dispatch_block, end_block);
+        builder.CreateCondBr(is_zero(builder, do_jump), dispatch_block, end_block);
 
         //verify_function(func);
 
@@ -564,7 +542,7 @@ int main(int argc, char** argv) {
     Py_InitializeEx(0);
 
     //char* args[] = {"", "-debug-only=jit"};
-    char* args[] = {"", "-print-machineinstrs"};
+    //char* args[] = {"", "-print-machineinstrs"};
     //llvm::cl::ParseCommandLineOptions(2, args);
 
     // C or C++ do not have a function "read a file into a string"????
