@@ -7,6 +7,7 @@
 #include "opcode.h"
 #include "pythonrun.h"
 #include "frameobject.h"
+#include "pythread.h"
 
 #include <map>
 #include <sstream>
@@ -61,6 +62,7 @@ public:
             FPM->add(createInstructionCombiningPass());
             // Dead code Elimination
             FPM->add(createDeadCodeEliminationPass());
+            FPM->add(createGVNPass());                  // GVN for load instructions
             FPM->add(createCFGSimplificationPass());
         }
         if (optimize == 2) {
@@ -490,7 +492,7 @@ JITRuntime* jit = 0;
 extern "C"
 void init_jit_runtime() 
 {
-    jit = new JITRuntime(3);
+    jit = new JITRuntime(1);
 }
 
 extern "C"
@@ -537,6 +539,18 @@ void finalize_jitted_function(PyCodeObject* co)
 #ifdef JIT_TEST
 
 #include <llvm/Support/CommandLine.h>
+
+// dummy vars
+volatile int _Py_Ticker;
+int _Py_CheckInterval;
+
+volatile int things_to_do;
+volatile int pendingfirst;
+volatile int pendinglast;
+
+PyThread_type_lock interpreter_lock; /* This is the GIL */
+long main_thread;
+// end dummy vars
 
 int main(int argc, char** argv) {
     Py_InitializeEx(0);
