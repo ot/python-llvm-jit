@@ -158,11 +158,13 @@ DLLLIBRARY=	@DLLLIBRARY@
 LDLIBRARYDIR=   @LDLIBRARYDIR@
 INSTSONAME=	@INSTSONAME@
 
+LLVM_CFLAGS=`llvm-config --cppflags`
+LLVM_LDFLAGS=`llvm-config --ldflags --libs core jit native bitreader bitwriter ipo interpreter`
 
 LIBS=		@LIBS@
 LIBM=		@LIBM@
 LIBC=		@LIBC@
-SYSLIBS=	$(LIBM) $(LIBC) `llvm-config --ldflags --libs core jit native bitreader bitwriter ipo interpreter`
+SYSLIBS=	$(LIBM) $(LIBC) $(LLVM_LDFLAGS)
 SHLIBS=		@SHLIBS@ 
 
 THREADOBJ=	@THREADOBJ@
@@ -275,8 +277,8 @@ PYTHON_OBJS=	\
 		Python/pystrtod.o \
 		Python/$(DYNLOADFILE) \
 		$(MACHDEP_OBJS) \
-		$(THREADOBJ)
-
+		$(THREADOBJ) \
+		JitCompiler/JitCompiler.o
 
 ##########################################################################
 # Objects
@@ -327,8 +329,7 @@ LIBRARY_OBJS=	\
 		$(PYTHON_OBJS) \
 		$(MODULE_OBJS) \
 		$(SIGNAL_OBJS) \
-		$(MODOBJS) \
-		JitCompiler/JitCompiler.o
+		$(MODOBJS) 
 
 #########################################################################
 # Rules
@@ -505,12 +506,16 @@ Python/importdl.o: $(srcdir)/Python/importdl.c
 Objects/unicodectype.o:	$(srcdir)/Objects/unicodectype.c \
 				$(srcdir)/Objects/unicodetype_db.h
 
-JitCompiler/JitCompiler.o: 
-	make -C JitCompiler JitCompiler.o
+JitCompiler/JitCompiler.o: $(srcdir)/JitCompiler/JitCompiler.cpp
+	$(CXX) -c $(PY_CFLAGS) $(LLVM_CFLAGS) -o $@ $(srcdir)/JitCompiler/JitCompiler.cpp
 
-vm_runtime.bc: 
-	make -C JitCompiler vm_runtime.bc
-	cp JitCompiler/vm_runtime.bc .
+JitCompiler/vm_runtime.bc: $(srcdir)/JitCompiler/vm_opcodes.c
+	llvm-gcc --emit-llvm  $(PY_CFLAGS) -DNDEBUG -O3 -g0 \
+		 $(srcdir)/JitCompiler/vm_opcodes.c -c -o $@
+
+
+vm_runtime.bc: $(srcdir)/JitCompiler/vm_runtime.bc
+	cp $(srcdir)/JitCompiler/vm_runtime.bc .
 
 ############################################################################
 # Header files
@@ -1036,6 +1041,7 @@ clean: pycremoval
 	find . -name '*.s[ol]' -exec rm -f {} ';'
 	find $(srcdir)/build -name 'fficonfig.h' -exec rm -f {} ';' || true
 	find $(srcdir)/build -name 'fficonfig.py' -exec rm -f {} ';' || true
+	find . -name 'vm_runtime.bc' -exec rm -f {} ';'
 
 clobber: clean
 	-rm -f $(BUILDPYTHON) $(PGEN) $(LIBRARY) $(LDLIBRARY) $(DLLLIBRARY) \
@@ -1102,6 +1108,5 @@ Python/thread.o: @THREADHEADERS@
 .PHONY: frameworkinstallmaclib frameworkinstallapps frameworkinstallunixtools
 .PHONY: frameworkaltinstallunixtools recheck autoconf clean clobber distclean 
 .PHONY: smelly funny
-.PHONY: JitCompiler/JitCompiler.o vm_runtime.bc
 
 # IF YOU PUT ANYTHING HERE IT WILL GO AWAY

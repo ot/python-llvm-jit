@@ -13,6 +13,7 @@
 #include <sstream>
 #include <stdint.h>
 #include <cstdlib>
+#include <stdexcept>
 
 static intptr_t py_id(PyObject* o) {
     return (intptr_t)o;
@@ -23,7 +24,7 @@ public:
     JITRuntime(int optimize = 1) {
         using namespace llvm;
         MemoryBuffer* buffer = MemoryBuffer::getFile("vm_runtime.bc");
-        assert(buffer);				
+        if (!buffer) throw std::runtime_error("Error loading vm_runtime.bc (is it in the current directory?)");
         MP = getBitcodeModuleProvider(buffer);
         the_module = MP->materializeModule(); // XXX materialize needed for inlining?
         EE = ExecutionEngine::create(MP, false, 0, false);
